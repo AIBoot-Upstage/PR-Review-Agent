@@ -3,25 +3,6 @@ services:
     image: ${AI_REVIEWER_IMAGE}
     env_file:
       - .env
-    environment:
-      APP_ENV: ${APP_ENV:-staging}
-      PORT: ${PORT:-8080}
-      LLM_MODE: ${LLM_MODE:-litellm}
-      PUBLISH_MODE: ${PUBLISH_MODE:-local}
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-postgres}
-      RAG_BACKEND: ${RAG_BACKEND:-postgres}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://reviewer:reviewer@postgres:5432/reviewer}
-      AI_REVIEWER_TOKEN: ${AI_REVIEWER_TOKEN:-}
-      UPSTAGE_API_KEY: ${UPSTAGE_API_KEY:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      SOLAR3_MODEL: ${SOLAR3_MODEL:-solar3}
-      SOLAR3_LOW_REASONING_EFFORT: ${SOLAR3_LOW_REASONING_EFFORT:-low}
-      SOLAR3_MEDIUM_REASONING_EFFORT: ${SOLAR3_MEDIUM_REASONING_EFFORT:-medium}
-      SOLAR3_HIGH_REASONING_EFFORT: ${SOLAR3_HIGH_REASONING_EFFORT:-high}
-      POLICY_ROOT: /app/policies
-      LOCAL_DATA_DIR: /app/.local-data
-      REVIEW_STORE_PATH: /app/.local-data/reviews.json
-      COMMENT_OUTPUT_DIR: /app/.local-data/comments
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     volumes:
