@@ -64,10 +64,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate required configuration
+        env:
+          MACBOOK_SSH_KEY: ${{ secrets.MACBOOK_SSH_KEY }}
+          MACBOOK_SSH_KEY_B64: ${{ secrets.MACBOOK_SSH_KEY_B64 }}
         run: |
           test -n "${MACBOOK_HOST}" || (echo "MACBOOK_HOST secret is required" && exit 1)
           test -n "${MACBOOK_USER}" || (echo "MACBOOK_USER secret is required" && exit 1)
-          test -n "${{ secrets.MACBOOK_SSH_KEY }}" || (echo "MACBOOK_SSH_KEY secret is required" && exit 1)
+          test -n "${MACBOOK_SSH_KEY}${MACBOOK_SSH_KEY_B64}" || (echo "MACBOOK_SSH_KEY_B64 or MACBOOK_SSH_KEY secret is required" && exit 1)
           test -n "${{ secrets.TS_AUTHKEY }}" || (echo "TS_AUTHKEY secret is required" && exit 1)
           test -n "${{ secrets.AI_REVIEWER_TOKEN }}" || (echo "AI_REVIEWER_TOKEN secret is required" && exit 1)
 
@@ -78,11 +81,30 @@ jobs:
           ping: ${{ env.MACBOOK_HOST }}
 
       - name: Prepare SSH key
+        env:
+          MACBOOK_SSH_KEY: ${{ secrets.MACBOOK_SSH_KEY }}
+          MACBOOK_SSH_KEY_B64: ${{ secrets.MACBOOK_SSH_KEY_B64 }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.MACBOOK_SSH_KEY }}" > ~/.ssh/id_ed25519
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          key_b64 = os.getenv("MACBOOK_SSH_KEY_B64", "").strip()
+          key = os.getenv("MACBOOK_SSH_KEY", "")
+
+          if key_b64:
+              decoded = base64.b64decode(key_b64).decode("utf-8")
+          else:
+              decoded = key.replace("\\n", "\n")
+
+          normalized = decoded.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+          Path.home().joinpath(".ssh/id_ed25519").write_text(normalized, encoding="utf-8")
+          PY
           chmod 600 ~/.ssh/id_ed25519
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
 
       - name: Package current revision
         run: |
