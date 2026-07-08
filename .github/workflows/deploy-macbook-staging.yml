@@ -65,12 +65,11 @@ jobs:
 
       - name: Validate required configuration
         env:
-          MACBOOK_SSH_KEY: ${{ secrets.MACBOOK_SSH_KEY }}
           MACBOOK_SSH_KEY_B64: ${{ secrets.MACBOOK_SSH_KEY_B64 }}
         run: |
           test -n "${MACBOOK_HOST}" || (echo "MACBOOK_HOST secret is required" && exit 1)
           test -n "${MACBOOK_USER}" || (echo "MACBOOK_USER secret is required" && exit 1)
-          test -n "${MACBOOK_SSH_KEY}${MACBOOK_SSH_KEY_B64}" || (echo "MACBOOK_SSH_KEY_B64 or MACBOOK_SSH_KEY secret is required" && exit 1)
+          test -n "${MACBOOK_SSH_KEY_B64}" || (echo "MACBOOK_SSH_KEY_B64 secret is required" && exit 1)
           test -n "${{ secrets.TS_AUTHKEY }}" || (echo "TS_AUTHKEY secret is required" && exit 1)
           test -n "${{ secrets.AI_REVIEWER_TOKEN }}" || (echo "AI_REVIEWER_TOKEN secret is required" && exit 1)
 
@@ -82,7 +81,6 @@ jobs:
 
       - name: Prepare SSH key
         env:
-          MACBOOK_SSH_KEY: ${{ secrets.MACBOOK_SSH_KEY }}
           MACBOOK_SSH_KEY_B64: ${{ secrets.MACBOOK_SSH_KEY_B64 }}
         run: |
           mkdir -p ~/.ssh
@@ -90,17 +88,26 @@ jobs:
           python - <<'PY'
           import base64
           import os
+          import re
           from pathlib import Path
 
-          key_b64 = os.getenv("MACBOOK_SSH_KEY_B64", "").strip()
-          key = os.getenv("MACBOOK_SSH_KEY", "")
+          key_b64 = re.sub(r"\s+", "", os.getenv("MACBOOK_SSH_KEY_B64", ""))
+          if not key_b64:
+              raise SystemExit("MACBOOK_SSH_KEY_B64 is empty")
 
-          if key_b64:
-              decoded = base64.b64decode(key_b64).decode("utf-8")
-          else:
-              decoded = key.replace("\\n", "\n")
+          try:
+              decoded = base64.b64decode(key_b64, validate=True).decode("utf-8")
+          except Exception as exc:
+              raise SystemExit("MACBOOK_SSH_KEY_B64 is not valid base64") from exc
 
           normalized = decoded.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+          first_line = normalized.splitlines()[0] if normalized.splitlines() else ""
+          if "PRIVATE KEY" not in first_line:
+              raise SystemExit(
+                  "MACBOOK_SSH_KEY_B64 must be the base64 of the PRIVATE key, "
+                  "not the .pub file or raw public key"
+              )
+
           Path.home().joinpath(".ssh/id_ed25519").write_text(normalized, encoding="utf-8")
           PY
           chmod 600 ~/.ssh/id_ed25519
