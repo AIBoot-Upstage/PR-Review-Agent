@@ -70,16 +70,76 @@ class GitHubPublisher:
 
     def publish(self, request: ReviewRequest, result: ReviewResult) -> dict[str, object]:
         token = self._token_for(request)
-        url = (
-            "https://api.github.com/repos/"
-            f"{request.repository.owner}/{request.repository.name}/issues/"
-            f"{request.pull_request.number}/comments"
+        body = self._post_issue_comment(request, token, format_review_markdown(result))
+        check_run = self._complete_check_run(request, result, token)
+        mode = "github_app" if self.app_client and not self.token else "github"
+        return {
+            "mode": mode,
+            "comment_id": body.get("id"),
+            "html_url": body.get("html_url"),
+            "check_run_id": check_run.get("id") if check_run else None,
+            "check_run_url": check_run.get("html_url") if check_run else None,
+        }
+
+    def _post_issue_comment(
+        self,
+        request: ReviewRequest,
+        token: str,
+        markdown: str,
+    ) -> dict[str, object]:
+        return self._request_json(
+            "POST",
+            (
+                "https://api.github.com/repos/"
+                f"{request.repository.owner}/{request.repository.name}/issues/"
+                f"{request.pull_request.number}/comments"
+            ),
+            token,
+            {"body": markdown},
         )
-        payload = json.dumps({"body": format_review_markdown(result)}).encode("utf-8")
+
+    def _complete_check_run(
+        self,
+        request: ReviewRequest,
+        result: ReviewResult,
+        token: str,
+    ) -> dict[str, object]:
+        if not self.app_client or not request.github.check_run_id:
+            return {}
+        summary = (
+            f"{result.summary.short_comment}\n\n"
+            f"- Route: {result.route.name}\n"
+            f"- Review tier: {result.route.model_tier}\n"
+            f"- Findings: {len(result.findings)}"
+        )
+        return self.app_client.update_check_run(
+            request.repository.owner,
+            request.repository.name,
+            request.github.check_run_id,
+            token,
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": _utc_now_iso(),
+                "output": {
+                    "title": "AI Code Review completed",
+                    "summary": summary,
+                },
+            },
+        )
+
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        token: str,
+        data: dict[str, object],
+    ) -> dict[str, object]:
+        payload = json.dumps(data).encode("utf-8")
         http_request = urllib.request.Request(
             url,
             data=payload,
-            method="POST",
+            method=method,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
@@ -88,9 +148,8 @@ class GitHubPublisher:
             },
         )
         with urllib.request.urlopen(http_request, timeout=20) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        mode = "github_app" if self.app_client and not self.token else "github"
-        return {"mode": mode, "comment_id": body.get("id"), "html_url": body.get("html_url")}
+            body = response.read().decode("utf-8")
+        return json.loads(body) if body else {}
 
     def _token_for(self, request: ReviewRequest) -> str:
         if self.token:
@@ -108,3 +167,9 @@ def create_publisher(settings: Settings) -> ReviewPublisher:
     if settings.publish_mode == "github" and settings.github_token:
         return GitHubPublisher(settings.github_token)
     return LocalPublisher(settings.comment_output_dir)
+
+
+def _utc_now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

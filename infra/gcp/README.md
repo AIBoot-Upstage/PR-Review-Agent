@@ -40,7 +40,8 @@ GitHub App setup:
 5. Configure repository permissions:
    - `Contents: Read`
    - `Pull requests: Read and write`
-   - `Checks: Read`
+   - `Issues: Read and write`
+   - `Checks: Read and write`
    - `Metadata: Read`
 6. Subscribe to events:
    - `pull_request`

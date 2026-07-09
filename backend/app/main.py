@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from dataclasses import replace
 from typing import Any
 
 try:
@@ -16,6 +17,7 @@ from backend.app.core.routing import select_route
 from backend.app.core.schemas import PullRequestFeatures, ReviewRequest
 from backend.app.services.events import InMemoryReviewEventBus
 from backend.app.services.github_app import (
+    GitHubAppClient,
     GitHubWebhookError,
     GitHubWebhookProcessor,
     verify_github_signature,
@@ -87,7 +89,12 @@ def _handle_github_webhook_background(
     payload: dict[str, Any],
 ) -> None:
     try:
-        plan = GitHubWebhookProcessor(settings).review_plan(event_name, delivery_id, payload)
+        github_client = GitHubAppClient(settings)
+        plan = GitHubWebhookProcessor(settings, client=github_client).review_plan(
+            event_name,
+            delivery_id,
+            payload,
+        )
         store = create_review_store(settings)
         existing_idempotency_keys = {
             str(record.get("idempotency_key", "")) for record in store.list_reviews()
@@ -103,6 +110,7 @@ def _handle_github_webhook_background(
                     },
                 )
                 continue
+            review_request = _create_pending_github_check(github_client, review_request)
             review_run_id = str(uuid.uuid4())
             review_events.publish(
                 review_run_id,
@@ -121,6 +129,41 @@ def _handle_github_webhook_background(
             "github webhook background task failed",
             extra={"event_name": event_name, "delivery_id": delivery_id},
         )
+
+
+def _create_pending_github_check(
+    github_client: GitHubAppClient,
+    review_request: ReviewRequest,
+) -> ReviewRequest:
+    if not review_request.github.installation_id:
+        return review_request
+    token = github_client.installation_token(review_request.github.installation_id)
+    check_run = github_client.create_check_run(
+        review_request.repository.owner,
+        review_request.repository.name,
+        token,
+        {
+            "name": settings.github_check_run_name,
+            "head_sha": review_request.pull_request.head_sha,
+            "status": "in_progress",
+            "started_at": _utc_now_iso(),
+            "output": {
+                "title": settings.github_check_run_name,
+                "summary": "AI 코드 리뷰를 실행 중입니다.",
+            },
+        },
+    )
+    github_payload = replace(
+        review_request.github,
+        check_run_id=str(check_run.get("id", "")),
+    )
+    return replace(review_request, github=github_payload)
+
+
+def _utc_now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @app.post("/v1/reviews", status_code=status.HTTP_202_ACCEPTED)

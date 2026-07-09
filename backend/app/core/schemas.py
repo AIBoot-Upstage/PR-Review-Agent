@@ -124,6 +124,7 @@ class GitHubPayload:
     event_name: str = "pull_request"
     delivery_id: str = ""
     installation_id: str = ""
+    check_run_id: str = ""
 
     @classmethod
     def from_dict(cls, payload: JsonDict | None) -> "GitHubPayload":
@@ -133,6 +134,7 @@ class GitHubPayload:
             event_name=_string(payload.get("event_name"), "pull_request"),
             delivery_id=_string(payload.get("delivery_id")),
             installation_id=_string(payload.get("installation_id")),
+            check_run_id=_string(payload.get("check_run_id")),
         )
 
 

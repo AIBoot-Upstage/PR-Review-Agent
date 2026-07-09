@@ -129,6 +129,35 @@ class GitHubAppClient:
         check_runs = payload.get("check_runs", [])
         return check_runs if isinstance(check_runs, list) else []
 
+    def create_check_run(
+        self,
+        owner: str,
+        repo: str,
+        token: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.request_json(
+            "POST",
+            f"/repos/{_quote(owner)}/{_quote(repo)}/check-runs",
+            token=token,
+            data=payload,
+        )
+
+    def update_check_run(
+        self,
+        owner: str,
+        repo: str,
+        check_run_id: str | int,
+        token: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.request_json(
+            "PATCH",
+            f"/repos/{_quote(owner)}/{_quote(repo)}/check-runs/{check_run_id}",
+            token=token,
+            data=payload,
+        )
+
     def paginated_get(self, path: str, token: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         separator = "&" if "?" in path else "?"
@@ -261,6 +290,13 @@ class GitHubWebhookProcessor:
             return GitHubWebhookReviewPlan("accepted", f"waiting for {payload_key} completion", [])
 
         check_payload = _dict(payload.get(payload_key))
+        if self.settings.github_app_id and (
+            _nested_str(check_payload, "app", "id") == str(self.settings.github_app_id)
+        ):
+            return GitHubWebhookReviewPlan("ignored", "self check event", [])
+        if payload_key == "check_run" and check_payload.get("name") == self.settings.github_check_run_name:
+            return GitHubWebhookReviewPlan("ignored", "self check_run event", [])
+
         pull_requests = check_payload.get("pull_requests") or []
         if not isinstance(pull_requests, list) or not pull_requests:
             return GitHubWebhookReviewPlan("ignored", f"{payload_key} has no pull requests", [])

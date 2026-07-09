@@ -69,6 +69,7 @@ export POSTGRES_USER="${POSTGRES_USER:-reviewer}"
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-reviewer}"
 export DATABASE_URL="${DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}}"
 export GITHUB_WEBHOOK_REVIEW_MODE="${GITHUB_WEBHOOK_REVIEW_MODE:-after_checks}"
+export GITHUB_CHECK_RUN_NAME="${GITHUB_CHECK_RUN_NAME:-AI Code Review}"
 
 if [ "${LLM_MODE}" = "litellm" ] && [ -z "${UPSTAGE_API_KEY:-}" ]; then
   echo "LLM_MODE=litellm 실행에는 UPSTAGE_API_KEY가 필요합니다."

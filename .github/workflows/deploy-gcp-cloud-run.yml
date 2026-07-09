@@ -10,6 +10,7 @@ env:
   CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'ai-code-review-agent' }}
   GITHUB_APP_ID: ${{ vars.GITHUB_APP_ID }}
   GITHUB_WEBHOOK_REVIEW_MODE: ${{ vars.GITHUB_WEBHOOK_REVIEW_MODE || 'after_checks' }}
+  GITHUB_CHECK_RUN_NAME: ${{ vars.GITHUB_CHECK_RUN_NAME || 'AI Code Review' }}
 
 jobs:
   deploy:
@@ -57,6 +58,7 @@ jobs:
             LLM_MODE=litellm
             PUBLISH_MODE=github_app
             GITHUB_WEBHOOK_REVIEW_MODE=${{ env.GITHUB_WEBHOOK_REVIEW_MODE }}
+            GITHUB_CHECK_RUN_NAME=${{ env.GITHUB_CHECK_RUN_NAME }}
             GITHUB_APP_ID=${{ env.GITHUB_APP_ID }}
             GITHUB_API_BASE_URL=https://api.github.com
             POLICY_ROOT=/app/policies
