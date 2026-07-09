@@ -183,6 +183,7 @@ class LiteLLMClient:
         }
         if reasoning_effort:
             completion_kwargs["reasoning_effort"] = reasoning_effort
+            completion_kwargs["allowed_openai_params"] = ["reasoning_effort"]
         response = completion(**completion_kwargs)
         latency_ms = int((time.perf_counter() - start) * 1000)
         content = response.choices[0].message.content
