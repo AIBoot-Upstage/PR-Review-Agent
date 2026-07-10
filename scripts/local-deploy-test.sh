@@ -25,7 +25,7 @@ if [ -f .env ]; then
   done < .env
 fi
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/local-deploy/docker-compose.yml}"
+COMPOSE_FILE="${LOCAL_DEPLOY_COMPOSE_FILE:-infra/local-deploy/docker-compose.yml}"
 PROJECT_NAME="${LOCAL_DEPLOY_PROJECT:-ai-code-review-agent-local}"
 AI_REVIEWER_IMAGE="${AI_REVIEWER_IMAGE:-ai-code-review-agent:local}"
 PORT="${PORT:-8080}"

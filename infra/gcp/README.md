@@ -2,13 +2,14 @@
 
 Target runtime: GCE VM self-host (`ai-code-review-agent`, `asia-northeast3-c`).
 
-`docker-compose.yml`이 `api + postgres(pgvector)`를 한 세트로 실행하도록 이미 구성되어
-있으므로, 이 compose 파일을 VM에 그대로 배포한다. 별도의 managed Postgres(Cloud SQL)는
-필요하지 않다.
+`docker-compose.yml`이 `api + postgres(pgvector)`를 기본 세트로 실행하도록 구성되어 있다.
+VM에서는 `COMPOSE_PROFILES=edge`로 `caddy` reverse proxy/TLS 서비스까지 함께 실행한다.
+GitHub Actions가 빌드한 Docker image를 `docker load`로 올리고, compose는 `--no-build`로
+image만 실행한다. 별도의 managed Postgres(Cloud SQL)는 필요하지 않다.
 
-현재 GCP 배포 workflow는 `workflow_dispatch` 수동 실행 전용이다. 로컬 배포 테스트
-(`./scripts/local-deploy-test.sh`)가 끝난 뒤 GitHub Actions에서
-`Deploy to GCP VM`을 직접 실행한다.
+현재 GCP 배포 workflow는 main 브랜치 CI 성공 후 자동 실행되며, `workflow_dispatch`로도
+수동 실행할 수 있다. GitHub repository variable `CD_DEPLOY_TARGET=local-only`로 바꾸면
+main push 후 image build 검증만 하고 VM 배포는 건너뛴다.
 
 Required GCP resources:
 
@@ -16,10 +17,12 @@ Required GCP resources:
    설치됨)
 2. 정적 외부 IP (`gcloud compute addresses create`로 예약 후 VM에 연결) — GitHub App
    webhook과 CI/CD가 참조할 안정적인 주소가 필요하다.
-3. 방화벽 규칙: `80`, `443`만 외부 공개, `8000`(app 컨테이너)은 내부 전용, `22`는 IAP
+3. 방화벽 규칙: `80`, `443`만 외부 공개, app 컨테이너 `PORT`는 loopback/internal 전용,
+   `22`는 IAP
    대역(`35.235.240.0/20`)으로만 허용
-4. VM 위에서 80/443을 받아 내부 8000으로 넘기는 리버스 프록시 + TLS 종료
-   (Caddy 권장 — 자동 Let's Encrypt 인증서 발급)
+4. VM 위에서 80/443을 받아 내부 app `PORT`로 넘기는 `caddy` reverse proxy + TLS 종료
+   (자동 Let's Encrypt 인증서 발급). `DOMAIN`이 실제 정적 IP를 가리키는 도메인이어야 한다.
+   실제 도메인이 없다면 `34-64-123-45.sslip.io`처럼 static IP 기반 sslip.io 도메인을 쓸 수 있다.
 5. Secret Manager 또는 VM의 `.env` 파일로 관리되는 `AI_REVIEWER_TOKEN`,
    `UPSTAGE_API_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_PRIVATE_KEY`,
    `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
@@ -33,6 +36,8 @@ Recommended GitHub repository variables:
 GCP_PROJECT_ID=charged-curve-501705-n9
 GCP_ZONE=asia-northeast3-c
 GCE_INSTANCE=ai-code-review-agent
+AI_REVIEWER_IMAGE_NAME=ai-code-review-agent-api
+CD_DEPLOY_TARGET=gcp-vm
 ```
 
 `GITHUB_APP_ID`, `GITHUB_WEBHOOK_REVIEW_MODE`, `UPSTAGE_API_KEY`,
@@ -46,20 +51,27 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/.../providers/...
 GCP_SERVICE_ACCOUNT=github-deployer@<project-id>.iam.gserviceaccount.com
 ```
 
+VM의 `~/ai-code-review-agent-deploy/.env`에는 image build용 local override를 넣지 않는다.
+로컬 테스트에서는 `COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml`, VM 배포에서는
+`COMPOSE_FILE=docker-compose.yml`만 사용한다. Caddy를 켜려면 `COMPOSE_PROFILES=edge`와
+`DOMAIN=<domain>`을 설정한다. 배포 workflow는 실행할 image tag를 `AI_REVIEWER_IMAGE`
+환경변수로 주입한다.
+
 GitHub App setup:
 
 1. Register a GitHub App owned by the target organization or user.
-2. Set webhook URL to `https://<static-ip-or-domain>/v1/github/webhooks`.
+2. Set webhook URL to `https://<DOMAIN>/v1/github/webhooks`.
 3. Generate a high-entropy webhook secret and save it as `GITHUB_WEBHOOK_SECRET`.
 4. Generate a private key and save the PEM content as `GITHUB_APP_PRIVATE_KEY`.
 5. Configure repository permissions:
    - `Contents: Read`
    - `Pull requests: Read and write`
-   - `Checks: Read`
+   - `Checks: Read and write`
    - `Metadata: Read`
 6. Subscribe to events:
    - `pull_request`
    - `check_suite`
+   - `check_run`
    - `installation`
    - `installation_repositories`
 

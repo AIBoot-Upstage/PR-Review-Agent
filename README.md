@@ -22,6 +22,12 @@ cp .env.example .env
 docker compose up --build
 ```
 
+`.env.example`은 로컬 build 테스트를 위해
+`COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml`로 되어 있습니다. GCP VM처럼
+이미 배포된 image만 실행하려면 `COMPOSE_FILE=docker-compose.yml`로 바꿉니다.
+VM에서 Caddy reverse proxy/TLS까지 같이 실행하려면 `.env`에
+`COMPOSE_PROFILES=edge`와 `DOMAIN=<domain>`을 추가합니다.
+
 Health check:
 
 ```bash
@@ -174,7 +180,7 @@ https://<vm-static-ip-or-domain>/v1/github/webhooks
 ```text
 Contents: Read
 Pull requests: Read and write
-Checks: Read
+Checks: Read and write
 Metadata: Read
 ```
 
@@ -183,6 +189,7 @@ Metadata: Read
 ```text
 pull_request
 check_suite
+check_run
 installation
 installation_repositories
 ```
@@ -255,18 +262,22 @@ docker compose -f infra/local-deploy/docker-compose.yml -p ai-code-review-agent-
 ## GCP Deployment Direction
 
 이 저장소는 GCE VM self-host 배포를 기준으로 구성되어 있습니다. 루트의
-`docker-compose.yml`이 `api + postgres(pgvector)`를 한 세트로 실행하므로, 별도의
+`docker-compose.yml`이 `api + postgres(pgvector)`를 기본 세트로 실행하고, VM에서는
+`COMPOSE_PROFILES=edge`로 `caddy` reverse proxy/TLS 서비스를 함께 실행합니다. 별도의
 managed 데이터베이스 없이 VM 한 대에 그대로 배포합니다.
 
-1. GitHub Actions CI에서 ruff와 test를 실행합니다.
-2. 수동 CD workflow가 IAP 터널로 VM에 접속해 저장소를 동기화합니다.
-3. VM에서 `docker compose up -d --build`로 `api + postgres` stack을 재시작합니다.
-4. VM 앞단 리버스 프록시(80/443, TLS)가 내부 `api` 컨테이너(8000)로 트래픽을 전달합니다.
+1. main push 이후 GitHub Actions CI에서 ruff와 test를 실행합니다.
+2. CI가 성공하면 CD workflow가 Docker image를 빌드합니다.
+3. WIF로 GCP 인증 후 IAP 터널로 VM에 image tar와 runtime 파일을 업로드합니다.
+4. VM에서 `docker load` 후 `docker compose up -d --no-build`로 stack을 재시작합니다.
+5. `caddy`가 80/443에서 TLS를 종료하고 내부 `api` 컨테이너의 `PORT`로 트래픽을 전달합니다.
 
-배포 workflow는 `.github/workflows/deploy-gcp-vm.yml`에 있습니다. GCP 배포는 로컬 배포
-테스트를 통과한 뒤 수동 실행하도록 구성되어 있습니다. VM의
+배포 workflow는 `.github/workflows/deploy-gcp-vm.yml`에 있습니다. VM의
 `~/ai-code-review-agent-deploy/.env`에는 GitHub App, Upstage, DB, Langfuse 값을 먼저
-채워둬야 합니다. 자세한 VM/방화벽/고정 IP 구성은 `infra/gcp/README.md`를 참고하세요.
+채워둬야 합니다. Caddy를 사용하려면 같은 `.env`에 `COMPOSE_PROFILES=edge`와 `DOMAIN`도
+설정합니다. GitHub repository variable `CD_DEPLOY_TARGET=local-only`로 바꾸면 main push 후
+image build 검증만 하고 GCP 배포는 건너뜁니다. 자세한 VM/방화벽/고정 IP 구성은
+`infra/gcp/README.md`를 참고하세요.
 
 ## Project Layout
 
