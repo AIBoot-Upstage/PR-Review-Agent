@@ -77,13 +77,13 @@ gcloud projects describe <PROJECT_ID> --format="value(projectNumber)"
 
 ### GitHub Variables 값별 출처
 
-| Key | 예시 | 어디서 확인/정하는가 | 설명 |
-| --- | --- | --- | --- |
-| `GCP_PROJECT_ID` | `charged-curve-501705-n9` | GCP Console 상단 project selector 또는 `gcloud projects list` | GCP project 이름이 아니라 Project ID |
-| `GCP_ZONE` | `asia-northeast3-c` | Compute Engine → VM instances → 대상 VM의 Zone 또는 `gcloud compute instances list` | 배포 대상 VM이 있는 zone |
-| `GCE_INSTANCE` | `ai-code-review-agent` | Compute Engine → VM instances → Name 또는 `gcloud compute instances list` | 배포 대상 VM 이름 |
-| `AI_REVIEWER_IMAGE_NAME` | `ai-code-review-agent-api` | 직접 정함 | Actions에서 빌드하는 Docker image 이름. registry 주소가 아니라 VM에 `docker load`될 로컬 image 이름 |
-| `CD_DEPLOY_TARGET` | `gcp-vm` | 직접 정함 | `gcp-vm`이면 VM 배포, `local-only`면 image build 검증만 수행 |
+| Key                      | 예시                       | 어디서 확인/정하는가                                                                | 설명                                                                                                |
+| ------------------------ | -------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `GCP_PROJECT_ID`         | `charged-curve-501705-n9`  | GCP Console 상단 project selector 또는 `gcloud projects list`                       | GCP project 이름이 아니라 Project ID                                                                |
+| `GCP_ZONE`               | `asia-northeast3-c`        | Compute Engine → VM instances → 대상 VM의 Zone 또는 `gcloud compute instances list` | 배포 대상 VM이 있는 zone                                                                            |
+| `GCE_INSTANCE`           | `ai-code-review-agent`     | Compute Engine → VM instances → Name 또는 `gcloud compute instances list`           | 배포 대상 VM 이름                                                                                   |
+| `AI_REVIEWER_IMAGE_NAME` | `ai-code-review-agent-api` | 직접 정함                                                                           | Actions에서 빌드하는 Docker image 이름. registry 주소가 아니라 VM에 `docker load`될 로컬 image 이름 |
+| `CD_DEPLOY_TARGET`       | `gcp-vm`                   | 직접 정함                                                                           | `gcp-vm`이면 VM 배포, `local-only`면 image build 검증만 수행                                        |
 
 확인 명령:
 
@@ -109,10 +109,10 @@ GCP_SERVICE_ACCOUNT=github-deployer@<PROJECT_ID>.iam.gserviceaccount.com
 
 ### GitHub Secrets 값별 출처
 
-| Key | 예시 | 어디서 확인/정하는가 | 설명 |
-| --- | --- | --- | --- |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL_ID>/providers/<PROVIDER_ID>` | GCP IAM → Workload Identity Federation → Provider 상세 또는 `gcloud iam workload-identity-pools providers describe ...` | GitHub Actions OIDC 토큰을 신뢰할 GCP provider resource name |
-| `GCP_SERVICE_ACCOUNT` | `github-deployer@<PROJECT_ID>.iam.gserviceaccount.com` | GCP IAM → Service Accounts 또는 `gcloud iam service-accounts list` | GitHub Actions가 WIF로 impersonate할 배포용 service account email |
+| Key                              | 예시                                                                                                 | 어디서 확인/정하는가                                                                                                    | 설명                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL_ID>/providers/<PROVIDER_ID>` | GCP IAM → Workload Identity Federation → Provider 상세 또는 `gcloud iam workload-identity-pools providers describe ...` | GitHub Actions OIDC 토큰을 신뢰할 GCP provider resource name      |
+| `GCP_SERVICE_ACCOUNT`            | `github-deployer@<PROJECT_ID>.iam.gserviceaccount.com`                                               | GCP IAM → Service Accounts 또는 `gcloud iam service-accounts list`                                                      | GitHub Actions가 WIF로 impersonate할 배포용 service account email |
 
 확인 명령:
 
@@ -219,7 +219,30 @@ DOMAIN=34-64-123-45.sslip.io
 roles/iap.tunnelResourceAccessor
 roles/compute.viewer
 roles/compute.osLogin 또는 roles/compute.osAdminLogin
+roles/iam.serviceAccountUser
 ```
+
+`roles/iam.serviceAccountUser`는 project 전체가 아니라 VM에 연결된 service account에 대해
+부여해도 된다. 이번 에러처럼 `The user does not have access to service account
+'<PROJECT_NUMBER>-compute@developer.gserviceaccount.com'`가 나오면, GitHub Actions가
+impersonate하는 배포용 service account가 VM의 service account를 사용할 권한이 없는 상태다.
+
+예시:
+
+```bash
+PROJECT_ID=charged-curve-501705-n9
+PROJECT_NUMBER=1026819034842
+DEPLOYER_SA=github-deployer@${PROJECT_ID}.iam.gserviceaccount.com
+VM_ATTACHED_SA=${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+
+gcloud iam service-accounts add-iam-policy-binding "${VM_ATTACHED_SA}" \
+  --project "${PROJECT_ID}" \
+  --member "serviceAccount:${DEPLOYER_SA}" \
+  --role "roles/iam.serviceAccountUser"
+```
+
+VM에 기본 Compute Engine service account가 아닌 별도 service account를 붙였다면
+`VM_ATTACHED_SA`를 해당 email로 바꾼다.
 
 VM 접속 계정은 Docker를 실행할 수 있어야 한다. OS Login을 사용하는 경우 GitHub Actions가
 impersonate하는 service account 기반 Linux 사용자가 `docker compose`를 실행할 수 있는지
@@ -300,48 +323,48 @@ COMMENT_OUTPUT_DIR=.local-data/comments
 
 직접 정하는 값:
 
-| Key | 예시 | 설명 |
-| --- | --- | --- |
-| `APP_ENV` | `production` | 운영 환경 표시용 값. 배포 VM에서는 `production` 권장 |
-| `PORT` | `8080` | 컨테이너 API 포트. reverse proxy도 같은 포트로 넘겨야 함 |
-| `COMPOSE_FILE` | `docker-compose.yml` | VM에서는 image 실행만 하므로 이 값 고정 |
-| `COMPOSE_PROFILES` | `edge` | VM에서 Caddy reverse proxy/TLS 서비스를 함께 실행하려면 `edge` 사용 |
-| `DOMAIN` | `review.example.com` 또는 `34-64-123-45.sslip.io` | Caddy가 HTTPS 인증서를 발급받을 도메인 |
-| `AI_REVIEWER_TOKEN` | 긴 랜덤 문자열 | 내부 API(`/v1/reviews`, policy sync 등)를 보호하는 Bearer token |
-| `PUBLISH_MODE` | `github_app` | 서버 배포에서는 GitHub App 방식 사용 |
-| `GITHUB_TOKEN` | 비움 | GitHub App 방식에서는 사용하지 않음 |
-| `GITHUB_WEBHOOK_REVIEW_MODE` | `after_checks` | CI 완료 이후 리뷰 실행 |
-| `GITHUB_CHECK_RUN_NAME` | `AI Code Review` | GitHub PR Checks에 표시될 이름 |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | 비움 | private key를 env 값으로 넣으면 비워둠 |
-| `GITHUB_API_BASE_URL` | `https://api.github.com` | GitHub Enterprise가 아니면 기본값 사용 |
-| `LLM_MODE` | `litellm` | 실제 Solar3 호출 모드 |
-| `UPSTAGE_API_BASE_URL` | `https://api.upstage.ai/v1` | Upstage OpenAI-compatible API base URL |
-| `SOLAR3_MODEL` | `solar-pro3` | Upstage Solar Pro 3 model id |
-| `SOLAR3_LOW_REASONING_EFFORT` | `low` | 단순 실패 리뷰용 추론 강도 |
-| `SOLAR3_MEDIUM_REASONING_EFFORT` | `medium` | 정책 기반 기본 리뷰용 추론 강도 |
-| `SOLAR3_HIGH_REASONING_EFFORT` | `high` | 수동 심층 리뷰용 추론 강도 |
-| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse Cloud 사용 시 기본값 |
-| `STORAGE_BACKEND` | `postgres` | 운영에서는 Postgres 사용 |
-| `RAG_BACKEND` | `postgres` | 운영에서는 pgvector RAG 사용 |
-| `POSTGRES_DB` | `reviewer` | 직접 정하는 DB 이름 |
-| `POSTGRES_USER` | `reviewer` | 직접 정하는 DB 사용자 |
-| `POSTGRES_PASSWORD` | 긴 랜덤 문자열 | 직접 정하는 DB 비밀번호. 첫 배포 전에 확정 권장 |
-| `DATABASE_URL` | `postgresql://reviewer:<password>@postgres:5432/reviewer` | 위 DB 값으로 직접 조립 |
-| `POLICY_ROOT` | `policies` | 배포 workflow가 업로드하는 정책 디렉터리 |
-| `LOCAL_DATA_DIR` | `.local-data` | 런타임 로컬 데이터 저장 경로 |
-| `REVIEW_STORE_PATH` | `.local-data/reviews.json` | local fallback용 리뷰 저장 파일 |
-| `COMMENT_OUTPUT_DIR` | `.local-data/comments` | local publish fallback용 댓글 저장 경로 |
+| Key                              | 예시                                                      | 설명                                                                |
+| -------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------- |
+| `APP_ENV`                        | `production`                                              | 운영 환경 표시용 값. 배포 VM에서는 `production` 권장                |
+| `PORT`                           | `8080`                                                    | 컨테이너 API 포트. reverse proxy도 같은 포트로 넘겨야 함            |
+| `COMPOSE_FILE`                   | `docker-compose.yml`                                      | VM에서는 image 실행만 하므로 이 값 고정                             |
+| `COMPOSE_PROFILES`               | `edge`                                                    | VM에서 Caddy reverse proxy/TLS 서비스를 함께 실행하려면 `edge` 사용 |
+| `DOMAIN`                         | `review.example.com` 또는 `34-64-123-45.sslip.io`         | Caddy가 HTTPS 인증서를 발급받을 도메인                              |
+| `AI_REVIEWER_TOKEN`              | 긴 랜덤 문자열                                            | 내부 API(`/v1/reviews`, policy sync 등)를 보호하는 Bearer token     |
+| `PUBLISH_MODE`                   | `github_app`                                              | 서버 배포에서는 GitHub App 방식 사용                                |
+| `GITHUB_TOKEN`                   | 비움                                                      | GitHub App 방식에서는 사용하지 않음                                 |
+| `GITHUB_WEBHOOK_REVIEW_MODE`     | `after_checks`                                            | CI 완료 이후 리뷰 실행                                              |
+| `GITHUB_CHECK_RUN_NAME`          | `AI Code Review`                                          | GitHub PR Checks에 표시될 이름                                      |
+| `GITHUB_APP_PRIVATE_KEY_PATH`    | 비움                                                      | private key를 env 값으로 넣으면 비워둠                              |
+| `GITHUB_API_BASE_URL`            | `https://api.github.com`                                  | GitHub Enterprise가 아니면 기본값 사용                              |
+| `LLM_MODE`                       | `litellm`                                                 | 실제 Solar3 호출 모드                                               |
+| `UPSTAGE_API_BASE_URL`           | `https://api.upstage.ai/v1`                               | Upstage OpenAI-compatible API base URL                              |
+| `SOLAR3_MODEL`                   | `solar-pro3`                                              | Upstage Solar Pro 3 model id                                        |
+| `SOLAR3_LOW_REASONING_EFFORT`    | `low`                                                     | 단순 실패 리뷰용 추론 강도                                          |
+| `SOLAR3_MEDIUM_REASONING_EFFORT` | `medium`                                                  | 정책 기반 기본 리뷰용 추론 강도                                     |
+| `SOLAR3_HIGH_REASONING_EFFORT`   | `high`                                                    | 수동 심층 리뷰용 추론 강도                                          |
+| `LANGFUSE_HOST`                  | `https://cloud.langfuse.com`                              | Langfuse Cloud 사용 시 기본값                                       |
+| `STORAGE_BACKEND`                | `postgres`                                                | 운영에서는 Postgres 사용                                            |
+| `RAG_BACKEND`                    | `postgres`                                                | 운영에서는 pgvector RAG 사용                                        |
+| `POSTGRES_DB`                    | `reviewer`                                                | 직접 정하는 DB 이름                                                 |
+| `POSTGRES_USER`                  | `reviewer`                                                | 직접 정하는 DB 사용자                                               |
+| `POSTGRES_PASSWORD`              | 긴 랜덤 문자열                                            | 직접 정하는 DB 비밀번호. 첫 배포 전에 확정 권장                     |
+| `DATABASE_URL`                   | `postgresql://reviewer:<password>@postgres:5432/reviewer` | 위 DB 값으로 직접 조립                                              |
+| `POLICY_ROOT`                    | `policies`                                                | 배포 workflow가 업로드하는 정책 디렉터리                            |
+| `LOCAL_DATA_DIR`                 | `.local-data`                                             | 런타임 로컬 데이터 저장 경로                                        |
+| `REVIEW_STORE_PATH`              | `.local-data/reviews.json`                                | local fallback용 리뷰 저장 파일                                     |
+| `COMMENT_OUTPUT_DIR`             | `.local-data/comments`                                    | local publish fallback용 댓글 저장 경로                             |
 
 외부 서비스에서 가져오는 값:
 
-| Key | 어디서 얻는가 | 설명 |
-| --- | --- | --- |
-| `UPSTAGE_API_KEY` | Upstage Console | Solar3 API 호출용 키 |
-| `GITHUB_WEBHOOK_SECRET` | 직접 생성 후 GitHub App Webhook Secret에 같은 값 입력 | GitHub webhook 서명 검증용 공유 비밀값 |
-| `GITHUB_APP_ID` | GitHub App 설정 화면 | App ID 값 |
-| `GITHUB_APP_PRIVATE_KEY` | GitHub App 설정 화면에서 private key 생성/다운로드 | installation token 발급용 private key |
-| `LANGFUSE_PUBLIC_KEY` | Langfuse Project Settings | LiteLLM observability public key |
-| `LANGFUSE_SECRET_KEY` | Langfuse Project Settings | LiteLLM observability secret key |
+| Key                      | 어디서 얻는가                                         | 설명                                   |
+| ------------------------ | ----------------------------------------------------- | -------------------------------------- |
+| `UPSTAGE_API_KEY`        | Upstage Console                                       | Solar3 API 호출용 키                   |
+| `GITHUB_WEBHOOK_SECRET`  | 직접 생성 후 GitHub App Webhook Secret에 같은 값 입력 | GitHub webhook 서명 검증용 공유 비밀값 |
+| `GITHUB_APP_ID`          | GitHub App 설정 화면                                  | App ID 값                              |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App 설정 화면에서 private key 생성/다운로드    | installation token 발급용 private key  |
+| `LANGFUSE_PUBLIC_KEY`    | Langfuse Project Settings                             | LiteLLM observability public key       |
+| `LANGFUSE_SECRET_KEY`    | Langfuse Project Settings                             | LiteLLM observability secret key       |
 
 값을 만드는 방법:
 
