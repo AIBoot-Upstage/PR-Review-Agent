@@ -32,6 +32,30 @@ Required GCP resources:
    보내기 위한 인증)
 7. GitHub App 설치 대상 repository/organization
 
+Required GCP APIs:
+
+```text
+iamcredentials.googleapis.com
+sts.googleapis.com
+compute.googleapis.com
+iap.googleapis.com
+oslogin.googleapis.com
+```
+
+`gcloud compute scp` 또는 `gcloud compute ssh`에서
+`Unable to acquire impersonated credentials`와
+`IAM Service Account Credentials API ... is disabled`가 나오면 다음 API가 꺼진 상태다.
+
+```bash
+gcloud services enable \
+  iamcredentials.googleapis.com \
+  sts.googleapis.com \
+  compute.googleapis.com \
+  iap.googleapis.com \
+  oslogin.googleapis.com \
+  --project <PROJECT_ID>
+```
+
 Recommended GitHub repository variables:
 
 ```text

@@ -153,6 +153,47 @@ GitHub OIDC Provider
 배포용 Service Account
 ```
 
+필수로 활성화할 GCP API:
+
+```text
+iamcredentials.googleapis.com
+sts.googleapis.com
+compute.googleapis.com
+iap.googleapis.com
+oslogin.googleapis.com
+```
+
+이번 배포 단계에서 `Unable to acquire impersonated credentials`와 함께
+`IAM Service Account Credentials API has not been used ... or it is disabled`가 나오면
+`iamcredentials.googleapis.com`이 꺼져 있는 상태다. GitHub Actions의 WIF 인증은 대상
+service account를 impersonate하면서 IAM Service Account Credentials API를 사용하므로,
+이 API가 꺼져 있으면 `gcloud compute scp`/`ssh` 단계에서 토큰 갱신이 실패한다.
+
+활성화 명령:
+
+```bash
+gcloud services enable \
+  iamcredentials.googleapis.com \
+  sts.googleapis.com \
+  compute.googleapis.com \
+  iap.googleapis.com \
+  oslogin.googleapis.com \
+  --project <PROJECT_ID>
+```
+
+Console에서는 다음 위치에서 켤 수 있다.
+
+```text
+GCP Console
+→ APIs & Services
+→ Library
+→ IAM Service Account Credentials API
+→ Enable
+```
+
+API를 방금 켰다면 권한 전파에 몇 분이 걸릴 수 있다. 같은 에러가 바로 반복되면 잠시 후
+workflow를 재실행한다.
+
 권장 VM:
 
 ```text
