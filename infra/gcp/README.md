@@ -77,6 +77,31 @@ GCP_WORKLOAD_IDENTITY_PROVIDER=projects/.../providers/...
 GCP_SERVICE_ACCOUNT=github-deployer@<project-id>.iam.gserviceaccount.com
 ```
 
+Required IAM roles for the deployer service account:
+
+```text
+roles/iap.tunnelResourceAccessor
+roles/compute.viewer
+roles/compute.osLogin 또는 roles/compute.osAdminLogin
+roles/iam.serviceAccountUser on the VM attached service account
+```
+
+`gcloud compute scp`에서 `The user does not have access to service account
+'<PROJECT_NUMBER>-compute@developer.gserviceaccount.com'`가 나오면, GitHub Actions가
+impersonate하는 배포용 service account에 VM service account 사용 권한이 없는 상태다.
+
+```bash
+PROJECT_ID=charged-curve-501705-n9
+PROJECT_NUMBER=1026819034842
+DEPLOYER_SA=github-deployer@${PROJECT_ID}.iam.gserviceaccount.com
+VM_ATTACHED_SA=${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+
+gcloud iam service-accounts add-iam-policy-binding "${VM_ATTACHED_SA}" \
+  --project "${PROJECT_ID}" \
+  --member "serviceAccount:${DEPLOYER_SA}" \
+  --role "roles/iam.serviceAccountUser"
+```
+
 VM의 `~/ai-code-review-agent-deploy/.env`에는 image build용 local override를 넣지 않는다.
 로컬 테스트에서는 `COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml`, VM 배포에서는
 `COMPOSE_FILE=docker-compose.yml`만 사용한다. Caddy를 켜려면 `COMPOSE_PROFILES=edge`와
