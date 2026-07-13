@@ -207,10 +207,10 @@ class LiteLLMClient:
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
             "max_tokens": {
-                "simple_failure_review": 700,
-                "policy_context_review": 1200,
-                "deep_quality_review": 1800,
-            }.get(route.name, 1200),
+                "simple_failure_review": 2000,
+                "policy_context_review": 4000,
+                "deep_quality_review": 6000,
+            }.get(route.name, 4000),
             "timeout": 90,
             "metadata": {
                 "review_run_id": review_run_id,
@@ -226,6 +226,14 @@ class LiteLLMClient:
         response = completion(**completion_kwargs)
         latency_ms = int((time.perf_counter() - start) * 1000)
         content = response.choices[0].message.content
+        if not content or not content.strip():
+            finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+            usage_payload = getattr(response, "usage", None)
+            completion_tokens = int(getattr(usage_payload, "completion_tokens", 0) or 0)
+            raise RuntimeError(
+                "LLM response content was empty "
+                f"(finish_reason={finish_reason}, completion_tokens={completion_tokens})"
+            )
         parsed = _parse_json(content)
 
         summary_payload = parsed.get("summary", {})
