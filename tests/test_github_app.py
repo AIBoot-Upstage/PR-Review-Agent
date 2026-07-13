@@ -7,6 +7,7 @@ from backend.app.services.github_app import (
     DEEP_REVIEW_ACTION_IDENTIFIER,
     GitHubWebhookError,
     GitHubWebhookProcessor,
+    _complexity_source_priority,
     verify_github_signature,
 )
 from backend.app.services.rag import REPOSITORY_POLICY_PATH
@@ -78,6 +79,23 @@ def _pull_request_payload(number=7):
 
 
 class GitHubWebhookTest(unittest.TestCase):
+    def test_complexity_source_priority_prefers_branch_heavy_patch(self):
+        large_linear_change = {
+            "additions": 200,
+            "deletions": 0,
+            "patch": "+value = normalize(value)\n" * 20,
+        }
+        smaller_branch_change = {
+            "additions": 20,
+            "deletions": 0,
+            "patch": "+if value:\n+    return value\n" * 4,
+        }
+
+        self.assertGreater(
+            _complexity_source_priority(smaller_branch_change),
+            _complexity_source_priority(large_linear_change),
+        )
+
     def test_verify_github_signature_accepts_valid_hmac(self):
         body = b'{"zen":"Keep it logically awesome."}'
         verify_github_signature(body, "secret", _signature(body, "secret"))

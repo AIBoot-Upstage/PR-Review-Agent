@@ -514,8 +514,7 @@ class GitHubWebhookProcessor:
                 for item in changed_files
                 if str(item.get("path") or "").lower().endswith(".py")
             ),
-            key=lambda item: int(item.get("additions") or 0)
-            + int(item.get("deletions") or 0),
+            key=_complexity_source_priority,
             reverse=True,
         )[:8]
 
@@ -587,6 +586,27 @@ def _changed_file_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "deletions": payload.get("deletions", 0),
         "patch": payload.get("patch", ""),
     }
+
+
+def _complexity_source_priority(payload: dict[str, Any]) -> tuple[int, int]:
+    patch = str(payload.get("patch") or "").lower()
+    control_flow_markers = (
+        " if ",
+        "+if ",
+        " elif ",
+        "+elif ",
+        " for ",
+        "+for ",
+        " while ",
+        "+while ",
+        " except ",
+        "+except ",
+        " case ",
+        "+case ",
+    )
+    control_flow_count = sum(patch.count(marker) for marker in control_flow_markers)
+    changed_lines = int(payload.get("additions") or 0) + int(payload.get("deletions") or 0)
+    return control_flow_count, changed_lines
 
 
 def _check_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
