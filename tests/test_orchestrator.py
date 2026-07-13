@@ -203,7 +203,7 @@ class OrchestratorTest(unittest.TestCase):
             self.assertEqual(result.findings[0].policy_source, "security-policy.md#SEC-LOG")
             published = next(settings.comment_output_dir.glob("*.md")).read_text(encoding="utf-8")
             self.assertIn("### 변경 요약", published)
-            self.assertIn("### 변경 파일별 변경 요약", published)
+            self.assertIn("### 파일별 변경 요약", published)
             self.assertIn("### 리뷰", published)
 
 

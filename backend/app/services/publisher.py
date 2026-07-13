@@ -61,6 +61,9 @@ ROUTE_REASON_LABELS = {
     ),
 }
 
+SUMMARY_COMMENT_MARKER = "<!-- ai-code-review-agent:summary:{scope} -->"
+INLINE_COMMENT_MARKER = "<!-- ai-code-review-agent:inline:{scope} -->"
+
 
 def _review_type_label(result: ReviewResult) -> str:
     return REVIEW_TYPE_LABELS.get(result.route.name, "자동 코드 리뷰")
@@ -80,6 +83,10 @@ def _route_reason_summary(result: ReviewResult) -> str:
 
 def _supports_manual_deep_review(result: ReviewResult) -> bool:
     return result.route.name == "policy_context_review"
+
+
+def _review_scope(result: ReviewResult) -> str:
+    return "deep" if result.route.name == "deep_quality_review" else "automatic"
 
 
 def _finding_markdown(finding: ReviewFinding, *, include_location: bool = True) -> str:
@@ -120,7 +127,7 @@ def format_review_markdown(
         "",
         result.summary.change_summary or result.summary.short_comment,
         "",
-        "### 변경 파일별 변경 요약",
+        "### 파일별 변경 요약",
         "",
         "| 파일 | 변경 내용 |",
         "| --- | --- |",
@@ -133,29 +140,32 @@ def format_review_markdown(
     else:
         lines.append("| - | 변경 파일 요약이 없습니다. |")
     lines.extend(["", "### 리뷰"])
-    if _supports_manual_deep_review(result):
+    if rendered_findings:
+        lines.extend(["", f"검증된 리뷰 {len(rendered_findings)}건입니다."])
+    else:
+        lines.extend(["", "추가로 지적할 문제가 없습니다."])
+    for index, finding in enumerate(rendered_findings, start=1):
         lines.extend(
             [
                 "",
-                "> 다른 시각의 심층 리뷰가 필요하면 GitHub Checks 화면의 "
-                "`심층 리뷰 실행` 버튼으로 추가 실행할 수 있습니다.",
+                f"{index}. {_finding_markdown(finding)}",
             ]
         )
     if inline_findings_count:
         lines.extend(
             [
                 "",
-                f"> 파일과 line이 검증된 {inline_findings_count}개 항목은 diff inline comment로 게시했습니다.",
+                f"> 이 중 {inline_findings_count}건은 diff의 해당 줄에도 inline comment로 표시했습니다.",
             ]
         )
-    if not rendered_findings and not inline_findings_count:
-        lines.append("")
-        lines.append("추가로 지적할 문제가 없습니다.")
-    for index, finding in enumerate(rendered_findings, start=1):
+    if _supports_manual_deep_review(result):
         lines.extend(
             [
                 "",
-                f"{index}. {_finding_markdown(finding)}",
+                "#### 추가 검토",
+                "",
+                "> 다른 시각의 심층 리뷰가 필요하면 GitHub Checks 화면의 "
+                "`심층 리뷰 실행` 버튼으로 추가 실행할 수 있습니다.",
             ]
         )
     return "\n".join(lines).strip() + "\n"
@@ -184,11 +194,18 @@ class GitHubPublisher:
     def publish(self, request: ReviewRequest, result: ReviewResult) -> dict[str, object]:
         token = self._token_for(request)
         inline_findings = [finding for finding in result.findings if finding.line_start is not None]
-        fallback_findings = [finding for finding in result.findings if finding.line_start is None]
+        scope = _review_scope(result)
+        inline_marker = INLINE_COMMENT_MARKER.format(scope=scope)
+        self._delete_previous_inline_comments(request, token, inline_marker)
         inline_review: dict[str, object] = {}
         if inline_findings:
             try:
-                inline_review = self._post_pull_review(request, token, inline_findings)
+                inline_review = self._post_pull_review(
+                    request,
+                    token,
+                    inline_findings,
+                    marker=inline_marker,
+                )
             except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
                 logger.exception(
                     "inline review publish failed; falling back to issue comment",
@@ -197,16 +214,18 @@ class GitHubPublisher:
                         "pull_request_number": request.pull_request.number,
                     },
                 )
-                fallback_findings = result.findings
                 inline_findings = []
-        body = self._post_issue_comment(
+        summary_marker = SUMMARY_COMMENT_MARKER.format(scope=scope)
+        markdown = format_review_markdown(
+            result,
+            findings=result.findings,
+            inline_findings_count=len(inline_findings),
+        )
+        body = self._upsert_issue_comment(
             request,
             token,
-            format_review_markdown(
-                result,
-                findings=fallback_findings,
-                inline_findings_count=len(inline_findings),
-            ),
+            f"{markdown}\n{summary_marker}\n",
+            summary_marker,
         )
         check_run = self._complete_check_run(request, result, token)
         mode = "github_app" if self.app_client and not self.token else "github"
@@ -225,6 +244,7 @@ class GitHubPublisher:
         request: ReviewRequest,
         token: str,
         findings: list[ReviewFinding],
+        marker: str = "",
     ) -> dict[str, object]:
         url = (
             "https://api.github.com/repos/"
@@ -236,7 +256,14 @@ class GitHubPublisher:
                 "path": finding.file_path,
                 "line": finding.line_start,
                 "side": "RIGHT",
-                "body": _finding_markdown(finding, include_location=False),
+                "body": "\n\n".join(
+                    part
+                    for part in (
+                        _finding_markdown(finding, include_location=False),
+                        marker,
+                    )
+                    if part
+                ),
             }
             for finding in findings
         ]
@@ -262,6 +289,90 @@ class GitHubPublisher:
         with urllib.request.urlopen(http_request, timeout=20) as response:
             response_body = response.read().decode("utf-8")
         return json.loads(response_body) if response_body else {}
+
+    def _delete_previous_inline_comments(
+        self,
+        request: ReviewRequest,
+        token: str,
+        marker: str,
+    ) -> None:
+        if not self.app_client:
+            return
+        path = (
+            f"/repos/{request.repository.owner}/{request.repository.name}/pulls/"
+            f"{request.pull_request.number}/comments"
+        )
+        try:
+            comments = self.app_client.paginated_get(path, token=token)
+            for comment in comments:
+                if marker not in str(comment.get("body") or ""):
+                    continue
+                if not self._is_own_app_comment(comment):
+                    continue
+                comment_id = comment.get("id")
+                if comment_id:
+                    self.app_client.request_json(
+                        "DELETE",
+                        f"/repos/{request.repository.owner}/{request.repository.name}/pulls/comments/"
+                        f"{comment_id}",
+                        token=token,
+                    )
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+            logger.exception(
+                "previous inline review cleanup failed",
+                extra={
+                    "repository": request.repository.full_name,
+                    "pull_request_number": request.pull_request.number,
+                },
+            )
+
+    def _upsert_issue_comment(
+        self,
+        request: ReviewRequest,
+        token: str,
+        markdown: str,
+        marker: str,
+    ) -> dict[str, object]:
+        if self.app_client:
+            path = (
+                f"/repos/{request.repository.owner}/{request.repository.name}/issues/"
+                f"{request.pull_request.number}/comments"
+            )
+            try:
+                comments = self.app_client.paginated_get(path, token=token)
+                for comment in reversed(comments):
+                    if marker not in str(comment.get("body") or ""):
+                        continue
+                    if not self._is_own_app_comment(comment):
+                        continue
+                    comment_id = comment.get("id")
+                    if comment_id:
+                        return self.app_client.request_json(
+                            "PATCH",
+                            f"/repos/{request.repository.owner}/{request.repository.name}/issues/comments/"
+                            f"{comment_id}",
+                            token=token,
+                            data={"body": markdown},
+                        )
+            except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+                logger.exception(
+                    "review summary lookup failed; posting a new comment",
+                    extra={
+                        "repository": request.repository.full_name,
+                        "pull_request_number": request.pull_request.number,
+                    },
+                )
+        return self._post_issue_comment(request, token, markdown)
+
+    def _is_own_app_comment(self, comment: dict[str, object]) -> bool:
+        if not self.app_client:
+            return False
+        settings = getattr(self.app_client, "settings", None)
+        configured_app_id = str(getattr(settings, "github_app_id", "") or "")
+        performed_by = comment.get("performed_via_github_app")
+        if not configured_app_id or not isinstance(performed_by, dict):
+            return False
+        return str(performed_by.get("id") or "") == configured_app_id
 
     def _post_issue_comment(
         self,
