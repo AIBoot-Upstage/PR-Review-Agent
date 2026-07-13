@@ -70,6 +70,70 @@ class LLMResponseParsingTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["max_tokens"], 8192)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
 
+    def test_retries_once_when_model_returns_truncated_json(self):
+        client = LiteLLMClient(
+            Settings(
+                llm_mode="litellm",
+                upstage_api_key="test-key",
+                upstage_api_base_url="https://api.upstage.ai/v1",
+            )
+        )
+        request = ReviewRequest.from_dict(
+            {
+                "repository": {"owner": "team", "name": "repo"},
+                "pull_request": {"number": 1, "head_sha": "head"},
+            }
+        )
+        route = ReviewRoute(
+            name="policy_context_review",
+            model_tier="solar3-medium",
+            use_rag=False,
+            focus=["general"],
+            reasons=["checks passed"],
+            confidence=0.9,
+        )
+        truncated = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"summary":{"short_comment":"끊긴 응답'),
+                    finish_reason="length",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20),
+        )
+        recovered = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"summary":{"overall_risk":"low",'
+                            '"change_summary":"응답을 복구했습니다.",'
+                            '"file_summaries":[]},"findings":[]}'
+                        )
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20),
+        )
+
+        with patch(
+            "litellm.completion",
+            side_effect=[truncated, recovered],
+        ) as completion:
+            summary, findings, _ = client.generate_review(
+                request,
+                route,
+                [],
+                [{"role": "user", "content": "review"}],
+            )
+
+        self.assertEqual(completion.call_count, 2)
+        self.assertEqual(completion.call_args_list[0].kwargs["metadata"]["response_attempt"], 1)
+        self.assertEqual(completion.call_args_list[1].kwargs["metadata"]["response_attempt"], 2)
+        self.assertEqual(summary.change_summary, "응답을 복구했습니다.")
+        self.assertEqual(findings, [])
+
     def test_file_summaries_reject_unknown_paths_and_fill_missing_files(self):
         client = LiteLLMClient(
             Settings(

@@ -327,18 +327,38 @@ class LiteLLMClient:
         if reasoning_effort:
             completion_kwargs["reasoning_effort"] = reasoning_effort
             completion_kwargs["allowed_openai_params"] = ["reasoning_effort"]
-        response = completion(**completion_kwargs)
+        response = None
+        parsed: dict[str, Any] | None = None
+        for response_attempt in range(1, 3):
+            attempt_kwargs = {
+                **completion_kwargs,
+                "metadata": {
+                    **completion_kwargs["metadata"],
+                    "response_attempt": response_attempt,
+                },
+            }
+            response = completion(**attempt_kwargs)
+            content = response.choices[0].message.content
+            try:
+                if not content or not content.strip():
+                    finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+                    usage_payload = getattr(response, "usage", None)
+                    completion_tokens = int(
+                        getattr(usage_payload, "completion_tokens", 0) or 0
+                    )
+                    raise RuntimeError(
+                        "LLM response content was empty "
+                        f"(finish_reason={finish_reason}, "
+                        f"completion_tokens={completion_tokens})"
+                    )
+                parsed = _parse_json(content)
+                break
+            except RuntimeError:
+                if response_attempt == 2:
+                    raise
+        if response is None or parsed is None:  # pragma: no cover - loop contract guard
+            raise RuntimeError("LLM response retry did not produce a result")
         latency_ms = int((time.perf_counter() - start) * 1000)
-        content = response.choices[0].message.content
-        if not content or not content.strip():
-            finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-            usage_payload = getattr(response, "usage", None)
-            completion_tokens = int(getattr(usage_payload, "completion_tokens", 0) or 0)
-            raise RuntimeError(
-                "LLM response content was empty "
-                f"(finish_reason={finish_reason}, completion_tokens={completion_tokens})"
-            )
-        parsed = _parse_json(content)
 
         summary_payload = parsed.get("summary", {})
         if not isinstance(summary_payload, dict):
