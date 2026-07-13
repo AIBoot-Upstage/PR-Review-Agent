@@ -269,6 +269,7 @@ class ModelCallUsage:
     status: str = "completed"
     reasoning_effort: str | None = None
     cost_usd: float = 0.0
+    batch_count: int = 1
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

@@ -2,7 +2,7 @@ import json
 import unittest
 
 from backend.app.core.schemas import PolicyChunk, ReviewRequest, ReviewRoute
-from backend.app.services.prompt_builder import build_review_messages
+from backend.app.services.prompt_builder import build_review_messages, build_review_prompt_batches
 
 
 def _request(changed_files=None):
@@ -30,6 +30,16 @@ def _request(changed_files=None):
 
 
 class PromptBuilderTest(unittest.TestCase):
+    def _policy_route(self):
+        return ReviewRoute(
+            name="policy_context_review",
+            model_tier="solar3-medium",
+            use_rag=True,
+            focus=["repo_policy"],
+            reasons=["repository policy is available"],
+            confidence=0.9,
+        )
+
     def test_deep_review_requests_complexity_and_simplification(self):
         route = ReviewRoute(
             name="deep_quality_review",
@@ -50,14 +60,7 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertEqual(user_payload["max_findings"], 8)
 
     def test_policy_context_includes_canonical_policy_source(self):
-        route = ReviewRoute(
-            name="policy_context_review",
-            model_tier="solar3-medium",
-            use_rag=True,
-            focus=["repo_policy"],
-            reasons=["repository policy is available"],
-            confidence=0.9,
-        )
+        route = self._policy_route()
         policy = PolicyChunk(
             source_path="policies/api-contract.md",
             section_title="Error response",
@@ -140,6 +143,36 @@ class PromptBuilderTest(unittest.TestCase):
         }
 
         self.assertIn("src/auth/token_store.py", included_paths)
+
+    def test_small_review_uses_single_prompt_batch(self):
+        batches = build_review_prompt_batches(_request(), self._policy_route(), [])
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].index, 1)
+        self.assertEqual(batches[0].count, 1)
+
+    def test_large_review_is_split_by_file_and_patch_budget(self):
+        files = [
+            {
+                "path": f"src/file_{index}.py",
+                "additions": 100,
+                "deletions": 0,
+                "patch": "+" + ("x" * 2499),
+            }
+            for index in range(12)
+        ]
+
+        batches = build_review_prompt_batches(_request(files), self._policy_route(), [])
+
+        self.assertGreater(len(batches), 1)
+        self.assertTrue(all(len(batch.request.changed_files) <= 4 for batch in batches))
+        self.assertTrue(all(batch.patch_chars <= 6_000 for batch in batches))
+        self.assertTrue(all(batch.count == len(batches) for batch in batches))
+        prompt_scope = json.loads(batches[0].messages[1]["content"])["review_payload"][
+            "prompt_scope"
+        ]
+        self.assertEqual(prompt_scope["original_total_files"], 12)
+        self.assertEqual(prompt_scope["batch_count"], len(batches))
 
 
 if __name__ == "__main__":

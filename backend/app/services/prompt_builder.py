@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, replace
 
 from backend.app.core.routing import HIGH_RISK_PATH_KEYWORDS
 from backend.app.core.schemas import ChangedFilePayload, PolicyChunk, ReviewRequest, ReviewRoute
@@ -69,6 +70,21 @@ ROUTE_PROMPT_BUDGETS = {
     "deep_quality_review": (30, 50_000),
 }
 
+ROUTE_BATCH_BUDGETS = {
+    "simple_failure_review": (4, 6_000),
+    "policy_context_review": (4, 6_000),
+    "deep_quality_review": (4, 7_000),
+}
+
+
+@dataclass(frozen=True)
+class ReviewPromptBatch:
+    request: ReviewRequest
+    messages: list[dict[str, str]]
+    index: int
+    count: int
+    patch_chars: int
+
 REVIEW_SIGNAL_MARKERS = {
     "authorization",
     "credential",
@@ -94,8 +110,13 @@ def _file_review_priority(changed_file: ChangedFilePayload) -> tuple[bool, bool,
 def _changed_file_snapshot(
     request: ReviewRequest,
     route: ReviewRoute,
+    budget: tuple[int, int] | None = None,
+    prompt_context: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    max_files, max_patch_chars = ROUTE_PROMPT_BUDGETS.get(route.name, (20, 30_000))
+    max_files, max_patch_chars = budget or ROUTE_PROMPT_BUDGETS.get(
+        route.name,
+        (20, 30_000),
+    )
     selected_files = sorted(
         request.changed_files,
         key=_file_review_priority,
@@ -118,20 +139,73 @@ def _changed_file_snapshot(
         )
         if remaining_patch_chars <= 0:
             break
-    return snapshots, {
+    scope: dict[str, object] = {
         "total_files": len(request.changed_files),
         "included_files": len(snapshots),
         "files_truncated": len(snapshots) < len(request.changed_files),
         "patch_char_budget": max_patch_chars,
     }
+    if prompt_context:
+        scope.update(prompt_context)
+    return snapshots, scope
+
+
+def _selected_files_for_review(
+    request: ReviewRequest,
+    route: ReviewRoute,
+) -> list[ChangedFilePayload]:
+    max_files, max_patch_chars = ROUTE_PROMPT_BUDGETS.get(route.name, (20, 30_000))
+    candidates = sorted(request.changed_files, key=_file_review_priority, reverse=True)[:max_files]
+    selected: list[ChangedFilePayload] = []
+    remaining_patch_chars = max_patch_chars
+    for changed_file in candidates:
+        if changed_file.patch:
+            if remaining_patch_chars <= 0:
+                continue
+            patch = changed_file.patch[: min(4000, remaining_patch_chars)]
+            remaining_patch_chars -= len(patch)
+            selected.append(replace(changed_file, patch=patch))
+        else:
+            selected.append(changed_file)
+    return selected
+
+
+def _group_files(
+    changed_files: list[ChangedFilePayload],
+    max_files: int,
+    max_patch_chars: int,
+) -> list[list[ChangedFilePayload]]:
+    groups: list[list[ChangedFilePayload]] = []
+    current: list[ChangedFilePayload] = []
+    current_patch_chars = 0
+    for changed_file in changed_files:
+        patch_chars = len(changed_file.patch)
+        if current and (
+            len(current) >= max_files or current_patch_chars + patch_chars > max_patch_chars
+        ):
+            groups.append(current)
+            current = []
+            current_patch_chars = 0
+        current.append(changed_file)
+        current_patch_chars += patch_chars
+    if current:
+        groups.append(current)
+    return groups
 
 
 def build_review_messages(
     request: ReviewRequest,
     route: ReviewRoute,
     policies: list[PolicyChunk],
+    budget: tuple[int, int] | None = None,
+    prompt_context: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
-    changed_files, prompt_scope = _changed_file_snapshot(request, route)
+    changed_files, prompt_scope = _changed_file_snapshot(
+        request,
+        route,
+        budget=budget,
+        prompt_context=prompt_context,
+    )
     payload = {
         "repository": request.repository.full_name,
         "pull_request": {
@@ -219,3 +293,47 @@ def build_review_messages(
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
     ]
+
+
+def build_review_prompt_batches(
+    request: ReviewRequest,
+    route: ReviewRoute,
+    policies: list[PolicyChunk],
+) -> list[ReviewPromptBatch]:
+    selected_files = _selected_files_for_review(request, route)
+    max_batch_files, max_batch_patch_chars = ROUTE_BATCH_BUDGETS.get(
+        route.name,
+        (4, 6_000),
+    )
+    file_groups = _group_files(selected_files, max_batch_files, max_batch_patch_chars)
+    if not file_groups:
+        file_groups = [[]]
+
+    batch_count = len(file_groups)
+    batches: list[ReviewPromptBatch] = []
+    for offset, changed_files in enumerate(file_groups):
+        batch_index = offset + 1
+        batch_request = replace(request, changed_files=changed_files)
+        patch_chars = sum(len(changed_file.patch) for changed_file in changed_files)
+        messages = build_review_messages(
+            batch_request,
+            route,
+            policies,
+            budget=(max_batch_files, max_batch_patch_chars),
+            prompt_context={
+                "original_total_files": len(request.changed_files),
+                "selected_total_files": len(selected_files),
+                "batch_index": batch_index,
+                "batch_count": batch_count,
+            },
+        )
+        batches.append(
+            ReviewPromptBatch(
+                request=batch_request,
+                messages=messages,
+                index=batch_index,
+                count=batch_count,
+                patch_chars=patch_chars,
+            )
+        )
+    return batches

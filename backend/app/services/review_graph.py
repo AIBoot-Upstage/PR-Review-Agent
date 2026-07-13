@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
 
 from backend.app.core.routing import extract_features, select_route
@@ -16,7 +18,7 @@ from backend.app.core.schemas import (
     ReviewSummary,
 )
 from backend.app.services.llm import LLMClient
-from backend.app.services.prompt_builder import build_review_messages
+from backend.app.services.prompt_builder import ReviewPromptBatch, build_review_prompt_batches
 from backend.app.services.publisher import ReviewPublisher
 from backend.app.services.rag import LocalPolicyIndex
 from backend.app.services.review_quality import validate_and_rank_findings
@@ -101,7 +103,7 @@ class ReviewWorkflowState(TypedDict, total=False):
     features: PullRequestFeatures
     route: ReviewRoute
     policies: list[PolicyChunk]
-    messages: list[dict[str, str]]
+    prompt_batches: list[ReviewPromptBatch]
     summary: ReviewSummary
     findings: list[ReviewFinding]
     finding_validation: JsonDict
@@ -225,26 +227,105 @@ class ReviewWorkflowGraph:
         return {"policies": []}
 
     def _build_prompt(self, state: ReviewWorkflowState) -> JsonDict:
-        messages = build_review_messages(state["request"], state["route"], state["policies"])
-        self._publish("prompt_built", {"messages_count": len(messages)})
-        return {"messages": messages}
+        batches = build_review_prompt_batches(
+            state["request"],
+            state["route"],
+            state["policies"],
+        )
+        self._publish(
+            "prompt_built",
+            {
+                "batch_count": len(batches),
+                "selected_files": sum(len(batch.request.changed_files) for batch in batches),
+                "patch_chars": sum(batch.patch_chars for batch in batches),
+            },
+        )
+        return {"prompt_batches": batches}
 
     def _call_llm(self, state: ReviewWorkflowState) -> JsonDict:
         route = state["route"]
+        batches = state["prompt_batches"]
         self._publish(
             "llm_call_started",
             {
                 "model_tier": route.model_tier,
                 "route_name": route.name,
+                "batch_count": len(batches),
             },
         )
-        summary, findings, usage = self.llm_client.generate_review(
-            request=state["request"],
-            route=route,
-            policies=state["policies"],
-            messages=state["messages"],
-            review_run_id=state["review_run_id"],
+        for batch in batches:
+            self._publish(
+                "llm_batch_started",
+                {
+                    "batch_index": batch.index,
+                    "batch_count": batch.count,
+                    "files_count": len(batch.request.changed_files),
+                    "patch_chars": batch.patch_chars,
+                },
+            )
+
+        def generate(batch: ReviewPromptBatch):
+            return self.llm_client.generate_review(
+                request=batch.request,
+                route=route,
+                policies=state["policies"],
+                messages=batch.messages,
+                review_run_id=state["review_run_id"],
+                batch_index=batch.index,
+                batch_count=batch.count,
+            )
+
+        started = time.perf_counter()
+        if len(batches) == 1:
+            batch_results = [generate(batches[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(batches))) as executor:
+                batch_results = list(executor.map(generate, batches))
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        summaries = [result[0] for result in batch_results]
+        findings = [finding for result in batch_results for finding in result[1]]
+        usages = [result[2] for result in batch_results]
+        risk_order = {"low": 0, "medium": 1, "high": 2}
+        representative = max(
+            summaries,
+            key=lambda summary: risk_order.get(summary.overall_risk.lower(), 1),
         )
+        if len(batches) == 1:
+            summary = representative
+        else:
+            summary = ReviewSummary(
+                route_name=route.name,
+                model_tier=route.model_tier,
+                overall_risk=representative.overall_risk,
+                short_comment=(
+                    f"변경사항을 {len(batches)}개 묶음으로 나누어 검토했습니다. "
+                    f"대표 요약: {representative.short_comment}"
+                ),
+            )
+        usage = ModelCallUsage(
+            provider=usages[0].provider,
+            model=usages[0].model,
+            prompt_tokens=sum(item.prompt_tokens for item in usages),
+            completion_tokens=sum(item.completion_tokens for item in usages),
+            latency_ms=latency_ms,
+            status="completed",
+            reasoning_effort=usages[0].reasoning_effort,
+            cost_usd=sum(item.cost_usd for item in usages),
+            batch_count=len(batches),
+        )
+        for batch, (_, batch_findings, batch_usage) in zip(batches, batch_results, strict=True):
+            self._publish(
+                "llm_batch_completed",
+                {
+                    "batch_index": batch.index,
+                    "batch_count": batch.count,
+                    "findings_count": len(batch_findings),
+                    "prompt_tokens": batch_usage.prompt_tokens,
+                    "completion_tokens": batch_usage.completion_tokens,
+                    "latency_ms": batch_usage.latency_ms,
+                },
+            )
         self._publish(
             "llm_call_completed",
             {
@@ -254,6 +335,7 @@ class ReviewWorkflowGraph:
                 "latency_ms": usage.latency_ms,
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
+                "batch_count": usage.batch_count,
             },
         )
         return {"summary": summary, "findings": findings, "usage": usage}

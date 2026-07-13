@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any, Protocol
 
@@ -24,6 +25,8 @@ class LLMClient(Protocol):
         policies: list[PolicyChunk],
         messages: list[dict[str, str]],
         review_run_id: str | None = None,
+        batch_index: int = 1,
+        batch_count: int = 1,
     ) -> tuple[ReviewSummary, list[ReviewFinding], ModelCallUsage]:
         ...
 
@@ -53,6 +56,8 @@ class MockLLMClient:
         policies: list[PolicyChunk],
         messages: list[dict[str, str]],
         review_run_id: str | None = None,
+        batch_index: int = 1,
+        batch_count: int = 1,
     ) -> tuple[ReviewSummary, list[ReviewFinding], ModelCallUsage]:
         start = time.perf_counter()
         findings: list[ReviewFinding] = []
@@ -161,6 +166,7 @@ class LiteLLMClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._langfuse_ready = False
+        self._langfuse_lock = threading.Lock()
 
     def _ensure_langfuse_callback(self) -> None:
         if (
@@ -169,16 +175,19 @@ class LiteLLMClient:
             or not self.settings.langfuse_secret_key
         ):
             return
-        import litellm
+        with self._langfuse_lock:
+            if self._langfuse_ready:
+                return
+            import litellm
 
-        os.environ["LANGFUSE_PUBLIC_KEY"] = self.settings.langfuse_public_key
-        os.environ["LANGFUSE_SECRET_KEY"] = self.settings.langfuse_secret_key
-        os.environ["LANGFUSE_HOST"] = self.settings.langfuse_host
-        if "langfuse" not in litellm.success_callback:
-            litellm.success_callback.append("langfuse")
-        if "langfuse" not in litellm.failure_callback:
-            litellm.failure_callback.append("langfuse")
-        self._langfuse_ready = True
+            os.environ["LANGFUSE_PUBLIC_KEY"] = self.settings.langfuse_public_key
+            os.environ["LANGFUSE_SECRET_KEY"] = self.settings.langfuse_secret_key
+            os.environ["LANGFUSE_HOST"] = self.settings.langfuse_host
+            if "langfuse" not in litellm.success_callback:
+                litellm.success_callback.append("langfuse")
+            if "langfuse" not in litellm.failure_callback:
+                litellm.failure_callback.append("langfuse")
+            self._langfuse_ready = True
 
     def generate_review(
         self,
@@ -187,6 +196,8 @@ class LiteLLMClient:
         policies: list[PolicyChunk],
         messages: list[dict[str, str]],
         review_run_id: str | None = None,
+        batch_index: int = 1,
+        batch_count: int = 1,
     ) -> tuple[ReviewSummary, list[ReviewFinding], ModelCallUsage]:
         try:
             from litellm import completion
@@ -206,11 +217,6 @@ class LiteLLMClient:
             "api_base": self.settings.upstage_api_base_url,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
-            "max_tokens": {
-                "simple_failure_review": 2000,
-                "policy_context_review": 4000,
-                "deep_quality_review": 6000,
-            }.get(route.name, 4000),
             "timeout": 90,
             "metadata": {
                 "review_run_id": review_run_id,
@@ -218,6 +224,8 @@ class LiteLLMClient:
                 "model_tier": route.model_tier,
                 "repository": request.repository.full_name,
                 "pull_request_number": request.pull_request.number,
+                "batch_index": batch_index,
+                "batch_count": batch_count,
             },
         }
         if reasoning_effort:
@@ -253,6 +261,7 @@ class LiteLLMClient:
             completion_tokens=int(getattr(usage_payload, "completion_tokens", 0) or 0),
             latency_ms=latency_ms,
             reasoning_effort=reasoning_effort,
+            batch_count=1,
         )
         return summary, findings, usage
 
