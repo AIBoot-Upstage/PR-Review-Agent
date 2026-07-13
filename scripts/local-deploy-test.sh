@@ -113,6 +113,16 @@ curl -fsS \
   >/dev/null
 
 if [ "${PUBLISH_MODE}" = "github_app" ]; then
+  echo "GitHub App 인증을 확인합니다."
+  "${COMPOSE_CMD[@]}" -f "${COMPOSE_FILE}" -p "${PROJECT_NAME}" exec -T api \
+    python - <<'PY'
+from backend.app.core.config import Settings
+from backend.app.services.github_app import GitHubAppClient
+
+client = GitHubAppClient(Settings.from_env())
+app = client.request_json("GET", "/app", token=client.create_jwt())
+print(f"GitHub App 인증 완료: {app.get('slug') or app.get('name') or app.get('id')}")
+PY
   echo "github_app 게시 모드에서는 sample-data에 installation_id가 없으므로 동기식 리뷰 smoke test를 건너뜁니다."
 else
   echo "동기식 리뷰 smoke test를 실행합니다."
