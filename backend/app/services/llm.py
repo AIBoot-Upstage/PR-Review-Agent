@@ -205,6 +205,7 @@ class LiteLLMClient:
             "api_key": self.settings.upstage_api_key,
             "api_base": self.settings.upstage_api_base_url,
             "temperature": 0.1,
+            "response_format": {"type": "json_object"},
             "max_tokens": {
                 "simple_failure_review": 700,
                 "policy_context_review": 1200,
@@ -256,15 +257,25 @@ def _litellm_model_id(model: str, api_base: str | None) -> str:
     return model
 
 
-def _parse_json(content: str) -> dict[str, Any]:
+def _parse_json(content: str | None) -> dict[str, Any]:
+    if not content or not content.strip():
+        raise RuntimeError("LLM response did not contain JSON content")
+
     try:
-        return json.loads(content)
-    except json.JSONDecodeError:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
         start = content.find("{")
         end = content.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise
-        return json.loads(content[start : end + 1])
+            raise RuntimeError("LLM response did not contain a JSON object") from exc
+        try:
+            parsed = json.loads(content[start : end + 1])
+        except json.JSONDecodeError as nested_exc:
+            raise RuntimeError("LLM response contained an invalid JSON object") from nested_exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("LLM response JSON must be an object")
+    return parsed
 
 
 def _finding_from_payload(payload: dict[str, Any]) -> ReviewFinding:
