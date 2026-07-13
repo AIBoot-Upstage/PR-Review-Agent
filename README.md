@@ -3,6 +3,10 @@
 GitHub Pull Request의 diff, lint/test 결과, 저장소 정책을 분석해 상황별로
 동일한 Solar3 모델의 low/medium/high 추론 강도를 선택하는 AI 코드 리뷰 에이전트입니다.
 
+프로젝트 전체를 코드 없이 파악하려면 [프로젝트 현황](docs/프로젝트%20현황.md)을 먼저
+읽으세요. 다른 사람에게 설명하기 위한 문제, 가치와 핵심 개념은
+[프로젝트 설명서](docs/프로젝트%20설명서.md)에 정리되어 있습니다.
+
 ## Local Quickstart
 
 의존성 설치 없이 mock LLM으로 핵심 흐름을 먼저 확인할 수 있습니다.
@@ -91,7 +95,14 @@ SOLAR3_MODEL=...
 SOLAR3_LOW_REASONING_EFFORT=low
 SOLAR3_MEDIUM_REASONING_EFFORT=medium
 SOLAR3_HIGH_REASONING_EFFORT=high
+SOLAR3_LOW_MAX_TOKENS=4096
+SOLAR3_MEDIUM_MAX_TOKENS=8192
+SOLAR3_HIGH_MAX_TOKENS=16384
 ```
+
+`max_tokens`는 내부 추론에서도 소모될 수 있어 표준 리뷰는 8,192, 선택형 심층 리뷰는
+16,384로 둡니다. 입력과 생성 상한의 합은 모델 context 이하여야 하며, 실제 사용량은
+Langfuse와 `review_runs.model_call`로 확인합니다.
 
 GitHub에 댓글을 게시하려면 PAT 기반 또는 GitHub App 기반 중 하나를 선택합니다.
 
@@ -129,7 +140,7 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 | --- | --- | --- |
 | syntax, lint, or test failed | `simple_failure_review` | `solar3-low` / `low` |
 | checks passed and repository policy exists | `policy_context_review` | `solar3-medium` / `medium` |
-| high-risk paths, large diff, or low confidence | `deep_quality_review` | `solar3-high` / `high` |
+| user requests the GitHub Check action | `deep_quality_review` | `solar3-high` / `high` |
 
 ## LangGraph Workflow
 
@@ -139,9 +150,11 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 create_review
  -> extract_features
  -> select_route
+ -> select_harness
  -> retrieve_policies 또는 skip_policy_retrieval
  -> build_prompt
  -> call_llm
+ -> validate_findings
  -> assemble_result
  -> persist_result
  -> publish_comment
@@ -153,18 +166,79 @@ create_review
 순서를 따르는 fallback executor가 동작하지만, 배포 환경은 `pyproject.toml`의
 `langgraph` 의존성으로 실제 LangGraph 런타임을 사용합니다.
 
+모델 결과는 바로 게시하지 않습니다. `validate_findings`에서 changed file, right-side diff line,
+정책 출처, 선택된 knowledge card ID와 severity 상한, 중복과 route별 최대 개수를 검증합니다.
+허용 카드 ID가 없거나 임의 ID를 사용한 finding은 폐기합니다. 검증된 line finding은 GitHub inline
+review로, 나머지는 PR-level summary comment로 게시합니다.
+
+## Review Evaluation Data
+
+공개 저장소의 PR review와 inline comment를 평가용 JSONL로 수집할 수 있습니다. 결과는 기본적으로
+Git에서 제외되는 `.local-data/`에 저장합니다.
+
+```bash
+GITHUB_TOKEN=... python -m scripts.collect_open_source_reviews \
+  openai/codex --max-prs 25
+```
+
+수집 데이터는 maintainer finding 재현율, 승인 상태 false-positive, 정책 미주입/주입 A/B 평가에
+사용하며 model input에는 maintainer comment와 이후 patch를 넣지 않습니다.
+
 ## Repository Policies
 
-Docker/배포 기본값은 Postgres + pgvector에 정책 chunk를 동기화한 뒤 검색합니다.
+Docker/배포 기본값은 Postgres `policy_chunks`에 정책 chunk를 동기화한 뒤 검색합니다.
 `POLICY_ROOT` 아래 Markdown, CODEOWNERS, PR template을 policy chunk로 분리해
 `policy_chunks` 테이블에 저장합니다. DB가 없는 로컬 개발에서는 같은 인터페이스로
 파일 기반 keyword retrieval fallback을 사용할 수 있습니다.
 
-기본 샘플:
+기본 공통 정책 세트:
 
 ```text
-policies/sample-review-policy.md
+policies/api-contract.md
+policies/github-review-workflow.md
+policies/testing-and-routing.md
+policies/security-and-privacy.md
+policies/performance-and-maintainability.md
+policies/observability-and-reliability.md
 ```
+
+현재 Postgres backend도 검색 자체는 lexical overlap을 사용하며 `embedding` 컬럼은 vector/hybrid
+retrieval 전환을 위한 예약 필드입니다. 설치 대상 repository의 문서를 자동 수집하는 방식이
+아니라, 배포된 위 정책 세트를 공통 기준으로 사용합니다.
+
+### Review Harness
+
+리뷰에는 모든 정책을 넣지 않습니다. 서비스 소유 하네스가 diff와 CI에서 신호를 추출하고,
+관련 `SKILL.md` 절차와 정책 유형을 고른 뒤 배치마다 최대 2개 정책 chunk만 prompt에 전달합니다.
+선택된 skill 안에서는 path와 patch marker가 맞는 knowledge card만 추가해 필요한 증거와 오탐
+방지 조건을 전달합니다. 삭제 line은 선택 신호에서 제외하고, 입력 sink와 API breaking처럼 오탐
+비용이 큰 카드는 path와 patch 조건을 함께 요구합니다. PR 요약 댓글은 `변경 요약`,
+`변경 파일별 변경 요약`, `리뷰` 세 구역으로 출력됩니다.
+자동 표준 리뷰에서는 범용 동작 카드를 사용하지 않으며, 구체적인 카드가 없는 batch는 finding을
+억지로 만들지 않습니다. route 전체 finding 상한은 batch 수로 나눠 각 호출에 적용합니다.
+
+skill과 knowledge card는 하나 이상의 `source_id`를 가져야 합니다. 공식 출처 registry에 없는 ID,
+중복 ID, HTTPS가 아닌 출처, 증거·오탐 조건이 비어 있는 카드는 하네스 초기화 단계에서 거부합니다.
+외부 지식 카드는 검토 관점일 뿐 저장소 정책이 아니므로 `policy_source`로 인용하지 않습니다.
+
+```text
+review_harness/manifest.json
+review_harness/scripts/diff_signals.py
+review_harness/skills/*/SKILL.md
+review_harness/references/knowledge-cards.json
+review_harness/references/sources.json
+review_harness/evaluation/policy-selection-fixtures.json
+```
+
+하네스 선택 baseline은 다음 명령으로 재현합니다.
+
+```bash
+python -m review_harness.scripts.evaluate_harness
+```
+
+이 스크립트의 Recall은 skill·정책 선택 정확도이며, 최종 LLM finding의 정확도는 별도의
+오픈소스 PR snapshot 평가로 측정해야 합니다. 보안을 위해 설치 저장소가 제공하는 임의 script나
+skill은 실행하지 않고 서비스 image에 포함된 검증된 하네스만 실행합니다.
 
 ## GitHub App Webhook Integration
 

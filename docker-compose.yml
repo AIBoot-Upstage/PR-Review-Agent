@@ -26,6 +26,10 @@ services:
       SOLAR3_LOW_REASONING_EFFORT: ${SOLAR3_LOW_REASONING_EFFORT:-low}
       SOLAR3_MEDIUM_REASONING_EFFORT: ${SOLAR3_MEDIUM_REASONING_EFFORT:-medium}
       SOLAR3_HIGH_REASONING_EFFORT: ${SOLAR3_HIGH_REASONING_EFFORT:-high}
+      SOLAR3_LOW_MAX_TOKENS: ${SOLAR3_LOW_MAX_TOKENS:-4096}
+      SOLAR3_MEDIUM_MAX_TOKENS: ${SOLAR3_MEDIUM_MAX_TOKENS:-8192}
+      SOLAR3_HIGH_MAX_TOKENS: ${SOLAR3_HIGH_MAX_TOKENS:-16384}
+      REVIEW_HARNESS_ROOT: /app/review_harness
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
@@ -38,6 +42,7 @@ services:
     volumes:
       - ./.local-data:/app/.local-data
       - ./policies:/app/policies:ro
+      - ./review_harness:/app/review_harness:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,7 +80,7 @@ services:
       timeout: 5s
       retries: 12
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped

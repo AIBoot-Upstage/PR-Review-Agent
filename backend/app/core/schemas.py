@@ -232,6 +232,68 @@ class PolicyChunk:
 
 
 @dataclass(frozen=True)
+class ReviewSkill:
+    skill_id: str
+    title: str
+    instructions: str
+    policy_types: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    score: int = 0
+
+    def to_dict(self, include_instructions: bool = True) -> JsonDict:
+        payload = asdict(self)
+        if not include_instructions:
+            payload.pop("instructions", None)
+        return payload
+
+
+@dataclass(frozen=True)
+class ReviewKnowledgeCard:
+    card_id: str
+    title: str
+    skill_id: str
+    check: str
+    evidence_required: str
+    false_positive_guard: str
+    severity_cap: str
+    source_ids: list[str] = field(default_factory=list)
+    score: int = 0
+
+    def to_dict(self, include_guidance: bool = True) -> JsonDict:
+        payload = asdict(self)
+        if not include_guidance:
+            payload.pop("check", None)
+            payload.pop("evidence_required", None)
+            payload.pop("false_positive_guard", None)
+        return payload
+
+
+@dataclass(frozen=True)
+class ReviewHarnessContext:
+    version: str
+    signals: dict[str, list[str]] = field(default_factory=dict)
+    skills: list[ReviewSkill] = field(default_factory=list)
+    knowledge_cards: list[ReviewKnowledgeCard] = field(default_factory=list)
+    policy_types: list[str] = field(default_factory=list)
+    candidate_policy_types: list[str] = field(default_factory=list)
+
+    def to_dict(self, include_instructions: bool = True) -> JsonDict:
+        return {
+            "version": self.version,
+            "signals": self.signals,
+            "skills": [
+                skill.to_dict(include_instructions=include_instructions) for skill in self.skills
+            ],
+            "knowledge_cards": [
+                card.to_dict(include_guidance=include_instructions)
+                for card in self.knowledge_cards
+            ],
+            "policy_types": self.policy_types,
+            "candidate_policy_types": self.candidate_policy_types,
+        }
+
+
+@dataclass(frozen=True)
 class ReviewFinding:
     severity: str
     category: str
@@ -242,7 +304,17 @@ class ReviewFinding:
     suggestion: str
     evidence: JsonDict = field(default_factory=dict)
     policy_source: str | None = None
+    knowledge_card_id: str | None = None
     confidence: float = 0.7
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FileChangeSummary:
+    file_path: str
+    change_summary: str
 
     def to_dict(self) -> JsonDict:
         return asdict(self)
@@ -254,6 +326,8 @@ class ReviewSummary:
     model_tier: str
     overall_risk: str
     short_comment: str
+    change_summary: str = ""
+    file_summaries: list[FileChangeSummary] = field(default_factory=list)
 
     def to_dict(self) -> JsonDict:
         return asdict(self)
@@ -269,6 +343,7 @@ class ModelCallUsage:
     status: str = "completed"
     reasoning_effort: str | None = None
     cost_usd: float = 0.0
+    batch_count: int = 1
 
     def to_dict(self) -> JsonDict:
         return asdict(self)
@@ -297,6 +372,8 @@ class ReviewResult:
     features: PullRequestFeatures
     model_call: ModelCallUsage
     retrieved_policies: list[PolicyChunk] = field(default_factory=list)
+    review_harness: ReviewHarnessContext | None = None
+    finding_validation: JsonDict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> JsonDict:
@@ -310,5 +387,11 @@ class ReviewResult:
             "features": self.features.to_dict(),
             "model_call": self.model_call.to_dict(),
             "retrieved_policies": [chunk.to_dict() for chunk in self.retrieved_policies],
+            "review_harness": (
+                self.review_harness.to_dict(include_instructions=False)
+                if self.review_harness is not None
+                else None
+            ),
+            "finding_validation": self.finding_validation,
             "created_at": self.created_at,
         }

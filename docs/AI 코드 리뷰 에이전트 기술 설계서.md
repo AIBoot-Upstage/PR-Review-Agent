@@ -77,8 +77,8 @@ flowchart TB
     subgraph Backend
         AUTH[Auth Middleware]
         REVIEW_API[Review API]
-        QUEUE[Review Queue]
-        WORKER[Review Worker]
+        TASK[FastAPI Background Task]
+        GRAPH[LangGraph Workflow]
         ROUTING[Routing Service]
         POLICY[Policy Service]
         PROMPT[Prompt Service]
@@ -87,31 +87,30 @@ flowchart TB
     end
 
     subgraph Storage
-        PG[(PostgreSQL)]
-        PGVECTOR[(pgvector)]
-        REDIS[(Redis)]
+        PG[(PostgreSQL review_runs / policy_chunks)]
     end
 
     subgraph External
         SOLAR[Upstage Solar3 API]
+        LANGFUSE[Langfuse Cloud]
     end
 
     PR_EVENT --> ACTION
     ACTION --> REVIEW_API
     REVIEW_API --> AUTH
-    REVIEW_API --> QUEUE
-    QUEUE --> REDIS
-    WORKER --> REDIS
-    WORKER --> ROUTING
-    WORKER --> POLICY
-    POLICY --> PGVECTOR
-    WORKER --> PROMPT
+    REVIEW_API --> TASK
+    TASK --> GRAPH
+    GRAPH --> ROUTING
+    GRAPH --> POLICY
+    POLICY --> PG
+    GRAPH --> PROMPT
     PROMPT --> LLMGW
     LLMGW --> SOLAR
-    WORKER --> PUBLISH
+    LLMGW --> LANGFUSE
+    GRAPH --> PUBLISH
     PUBLISH --> GH_API
     REVIEW_API --> PG
-    WORKER --> PG
+    GRAPH --> PG
 ```
 
 ### 서비스 경계
@@ -119,10 +118,11 @@ flowchart TB
 | 서비스 | 설명 |
 | --- | --- |
 | Review API | GitHub App webhook과 내부 리뷰 실행 요청을 받는 API |
-| Review Worker | LangGraph workflow로 긴 LLM 호출과 RAG 검색을 비동기로 처리하는 worker |
-| Policy Service | 저장소 정책 문서 indexing, 검색, 버전 관리 담당 |
-| Routing Service | test/lint 상태와 위험도 feature를 기반으로 모델 티어 결정 |
-| LLM Service | LiteLLM을 통해 Solar3 API 호출, 재시도, 사용량 기록 |
+| Background Task | 현재 FastAPI process 안에서 LangGraph 리뷰를 실행한다. durable queue는 후속 과제다. |
+| Policy Service | 배포된 공통 정책 문서 indexing과 lexical top-k 검색 담당 |
+| Policy Harness | 신뢰된 diff 신호 script로 skill과 batch별 정책 유형을 선택 |
+| Routing Service | test/lint 실패로 low/medium을 결정하고 위험 신호로 선택적 high를 권고 |
+| LLM Service | LiteLLM을 통해 Solar3 API를 호출하고 토큰, 지연시간, Langfuse trace 기록 |
 | Publish Service | GitHub API를 통해 comment/check run을 작성 |
 
 ### LangGraph Workflow Node
@@ -133,16 +133,19 @@ flowchart TB
 create_review
  -> extract_features
  -> select_route
+ -> select_harness
  -> retrieve_policies 또는 skip_policy_retrieval
  -> build_prompt
  -> call_llm
+ -> validate_findings
  -> assemble_result
  -> persist_result
  -> publish_comment
  -> complete_review
 ```
 
-`select_route` 이후에는 route의 `use_rag` 값에 따라 policy retrieval node로 분기한다.
+`select_route` 이후 `select_harness`가 관련 skill과 정책 유형을 정하고, route의 `use_rag` 값에
+따라 policy retrieval node로 분기한다.
 각 node는 SSE event를 발행하므로 UI 또는 로그에서 review_run 단위 실행 단계를 추적할 수 있다.
 
 ## 5. 라우팅 설계
@@ -165,15 +168,15 @@ create_review
 | 우선순위 | 조건 | 라우트 | 모델 티어 |
 | --- | --- | --- | --- |
 | 1 | `syntax_status=failed` 또는 `lint_status=failed` 또는 `test_status=failed` | `simple_failure_review` | Solar3 low |
-| 2 | 테스트 통과, 정책 문서 존재, 고위험 변경 아님 | `policy_context_review` | Solar3 medium |
-| 3 | 인증/권한/보안/결제/DB migration/인프라 변경 포함 | `deep_quality_review` | Solar3 high |
-| 4 | 변경 라인 수 또는 파일 수가 임계값 초과 | `deep_quality_review` | Solar3 high |
-| 5 | 라우팅 신뢰도 낮음 | `deep_quality_review` | Solar3 high |
+| 2 | 실패 check가 없는 자동 리뷰 | `policy_context_review` | Solar3 medium |
+| 3 | 사용자가 GitHub Check action으로 심층 리뷰 요청 | `deep_quality_review` | Solar3 high |
+
+고위험 파일, 600줄 초과, 20개 초과 파일은 자동 high 조건이 아니다. medium 리뷰의 route reason에 심층 검토 권고를 추가하고 사용자가 비용과 시간을 고려해 high 실행 여부를 선택한다.
 
 ### 라우팅 의사코드
 
 ```python
-def select_route(features: PullRequestFeatures) -> ReviewRoute:
+def select_route(features: PullRequestFeatures, review_mode: str) -> ReviewRoute:
     if features.syntax_failed or features.lint_failed or features.test_failed:
         return ReviewRoute(
             name="simple_failure_review",
@@ -182,26 +185,38 @@ def select_route(features: PullRequestFeatures) -> ReviewRoute:
             focus=["failure_summary", "likely_cause", "fix_priority"],
         )
 
-    if (
-        features.has_high_risk_files
-        or features.changed_lines > 600
-        or features.changed_files_count > 20
-        or features.router_confidence < 0.65
-    ):
+    if review_mode == "deep_quality_review":
         return ReviewRoute(
             name="deep_quality_review",
             model_tier="solar3-high",
-            use_rag=True,
-            focus=["architecture", "security", "performance", "maintainability"],
+            use_rag=features.policy_available,
+            focus=["architecture", "security", "time_complexity", "space_complexity", "simplification", "maintainability"],
         )
 
     return ReviewRoute(
         name="policy_context_review",
         model_tier="solar3-medium",
-        use_rag=True,
+        use_rag=features.policy_available,
         focus=["repo_policy", "style", "tests", "api_contract"],
     )
 ```
+
+### 정책 하네스 지식 계약
+
+하네스의 외부 검토 지식과 설치 저장소의 정책은 분리한다. 외부 지식은 공식 source registry에서
+검증된 일반 검토 관점이고, 저장소 정책은 해당 repository의 규범이며 finding의
+`policy_source`로 인용할 수 있다.
+
+| 자산 | 핵심 필드 | prompt 사용 |
+| --- | --- | --- |
+| Source | ID, 기관, 제목, HTTPS URL, topic, 정제 용도 | 원문·URL은 넣지 않음 |
+| Skill | ID, route, signal, policy type, source IDs | 선택된 절차만 넣음 |
+| Knowledge Card | skill ID, marker, check, evidence, false-positive guard, severity cap, source IDs | 선택된 카드만 넣음 |
+| Repository Policy | source path/SHA, section, content, policy type | 검색된 batch top-2만 넣음 |
+
+Source가 없거나 registry에 없는 ID를 참조하는 skill/card, 중복 ID, 필수 증거·오탐 필드가 빈
+카드는 `PolicyHarness` 초기화에서 거부한다. 카드가 선택돼도 모델은 diff에서 `evidence_required`를
+확인하고 `false_positive_guard`를 통과해야 하며, 카드 source ID를 정책 인용으로 출력할 수 없다.
 
 ## 6. RAG 설계
 
@@ -229,13 +244,16 @@ def select_route(features: PullRequestFeatures) -> ReviewRoute:
 | `content` | chunk 원문 |
 | `embedding` | vector embedding |
 
-### 검색 전략
+### 현재 검색 전략
 
 1. PR diff summary와 변경 파일 경로를 query로 구성한다.
-2. 변경 파일 확장자와 경로를 metadata filter로 사용한다.
-3. top-k 검색 후 같은 문서의 중복 chunk를 제거한다.
-4. 정책 근거가 필요한 medium/high 경로에만 RAG context를 주입한다.
-5. 리뷰 결과에는 `policy_source`를 포함해 어떤 정책에 근거했는지 남긴다.
+2. check summary와 제한된 patch token을 query에 추가한다.
+3. 신뢰된 diff script가 관련 skill과 정책 유형을 선택하고 token overlap score로 batch별 top-2를 선택한다.
+4. overlap이 없는 정책은 임의 fallback으로 반환하지 않는다.
+5. medium과 사용자 요청 high 경로에만 RAG context를 주입한다.
+6. prompt에는 source path, section title, retrieval score를 넣고 finding에는 canonical `policy_source`를 요구한다.
+
+현재 `embedding VECTOR(1536)` 컬럼은 예약 필드이며 embedding 생성과 vector distance 검색은 구현되지 않았다. 따라서 현행을 pgvector semantic search로 표현하지 않는다. 다음 단계에서 repository ID/source SHA 격리, embedding 생성, lexical+vector hybrid retrieval을 추가한다.
 
 ## 7. 데이터베이스 ERD
 
