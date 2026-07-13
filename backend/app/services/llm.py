@@ -313,6 +313,7 @@ class LiteLLMClient:
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
             "timeout": 90,
+            "num_retries": 1,
             "metadata": {
                 "review_run_id": review_run_id,
                 "route_name": route.name,

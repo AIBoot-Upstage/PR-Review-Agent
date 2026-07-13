@@ -67,6 +67,7 @@ class LLMResponseParsingTest(unittest.TestCase):
 
         kwargs = completion.call_args.kwargs
         self.assertEqual(kwargs["max_tokens"], 8192)
+        self.assertEqual(kwargs["num_retries"], 1)
         self.assertEqual(kwargs["metadata"]["max_tokens"], 8192)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
 
