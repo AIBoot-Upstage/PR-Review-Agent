@@ -186,10 +186,12 @@ class PolicyHarness:
             {policy_type for skill in selected for policy_type in skill.policy_types}
         )
         selected_skill_ids = {skill.skill_id for skill in selected}
-        changed_paths = "\n".join(file.path.lower() for file in request.changed_files)
-        changed_patches = "\n".join(
-            reviewable_patch_text(file.patch).lower() for file in request.changed_files
-        )
+        changed_file_signals = [
+            (file.path.lower(), reviewable_patch_text(file.patch).lower())
+            for file in request.changed_files
+        ]
+        changed_paths = "\n".join(path for path, _ in changed_file_signals)
+        changed_patches = "\n".join(patch for _, patch in changed_file_signals)
         cards: list[ReviewKnowledgeCard] = []
         for item in self.knowledge_cards:
             skill_id = str(item.get("skill_id") or "")
@@ -221,10 +223,23 @@ class PolicyHarness:
                 ),
                 None,
             )
+            matched_same_file = next(
+                (
+                    (path_marker, patch_marker)
+                    for path, patch in changed_file_signals
+                    for path_marker in path_markers
+                    for patch_marker in patch_markers
+                    if self._contains_marker(path, path_marker)
+                    and self._contains_marker(patch, patch_marker)
+                ),
+                None,
+            )
             if item.get("require_patch") and not matched_patch:
                 continue
-            if item.get("require_path_and_patch") and not (matched_path and matched_patch):
-                continue
+            if item.get("require_path_and_patch"):
+                if not matched_same_file:
+                    continue
+                matched_path, matched_patch = matched_same_file
             if (path_markers or patch_markers) and not (matched_path or matched_patch or always):
                 continue
             cards.append(

@@ -162,7 +162,7 @@ class OrchestratorTest(unittest.TestCase):
                     ],
                     "changed_files": [
                         {
-                            "path": "backend/auth/token.py",
+                            "path": "backend/auth/logging.py",
                             "status": "modified",
                             "additions": 1,
                             "deletions": 1,

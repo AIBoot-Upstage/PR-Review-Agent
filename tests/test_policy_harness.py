@@ -42,7 +42,7 @@ class PolicyHarnessTest(unittest.TestCase):
         self.assertIn("security-boundary", skill_ids)
         self.assertNotIn("performance-simplification", skill_ids)
         self.assertIn("security", context.policy_types)
-        self.assertIn(
+        self.assertNotIn(
             "secret-and-sensitive-log-flow",
             {card.card_id for card in context.knowledge_cards},
         )
@@ -122,6 +122,33 @@ class PolicyHarnessTest(unittest.TestCase):
         self.assertNotIn("test-distinguishes-regression", selected_card_ids)
         self.assertNotIn("test-brittle-implementation-detail", selected_card_ids)
         self.assertNotIn("secret-and-sensitive-log-flow", selected_card_ids)
+
+    def test_path_and_patch_card_markers_must_match_the_same_file(self):
+        request = ReviewRequest.from_dict(
+            {
+                "repository": {"owner": "team", "name": "repo"},
+                "pull_request": {"number": 13, "head_sha": "head"},
+                "changed_files": [
+                    {"path": "docs/logging.md", "patch": "+GitHub App setup guide"},
+                    {"path": "scripts/deploy.sh", "patch": "+token = client.create_jwt()"},
+                ],
+            }
+        )
+        route = ReviewRoute(
+            name="policy_context_review",
+            model_tier="solar3-medium",
+            use_rag=True,
+            focus=["repo_policy"],
+            reasons=["checks passed"],
+            confidence=0.9,
+        )
+
+        context = self.harness.select(request, route)
+
+        self.assertNotIn(
+            "secret-and-sensitive-log-flow",
+            {card.card_id for card in context.knowledge_cards},
+        )
 
     def test_prompt_includes_selected_skills_and_at_most_two_policies(self):
         request = ReviewRequest.from_dict(
