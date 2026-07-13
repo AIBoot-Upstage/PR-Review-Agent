@@ -95,7 +95,14 @@ SOLAR3_MODEL=...
 SOLAR3_LOW_REASONING_EFFORT=low
 SOLAR3_MEDIUM_REASONING_EFFORT=medium
 SOLAR3_HIGH_REASONING_EFFORT=high
+SOLAR3_LOW_MAX_TOKENS=4096
+SOLAR3_MEDIUM_MAX_TOKENS=8192
+SOLAR3_HIGH_MAX_TOKENS=16384
 ```
+
+`max_tokens`는 내부 추론에서도 소모될 수 있어 표준 리뷰는 8,192, 선택형 심층 리뷰는
+16,384로 둡니다. 입력과 생성 상한의 합은 모델 context 이하여야 하며, 실제 사용량은
+Langfuse와 `review_runs.model_call`로 확인합니다.
 
 GitHub에 댓글을 게시하려면 PAT 기반 또는 GitHub App 기반 중 하나를 선택합니다.
 
@@ -143,6 +150,7 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 create_review
  -> extract_features
  -> select_route
+ -> select_harness
  -> retrieve_policies 또는 skip_policy_retrieval
  -> build_prompt
  -> call_llm
@@ -159,8 +167,9 @@ create_review
 `langgraph` 의존성으로 실제 LangGraph 런타임을 사용합니다.
 
 모델 결과는 바로 게시하지 않습니다. `validate_findings`에서 changed file, right-side diff line,
-정책 출처, 중복과 route별 최대 개수를 검증합니다. 검증된 line finding은 GitHub inline review로,
-나머지는 PR-level summary comment로 게시합니다.
+정책 출처, 선택된 knowledge card ID와 severity 상한, 중복과 route별 최대 개수를 검증합니다.
+허용 카드 ID가 없거나 임의 ID를 사용한 finding은 폐기합니다. 검증된 line finding은 GitHub inline
+review로, 나머지는 PR-level summary comment로 게시합니다.
 
 ## Review Evaluation Data
 
@@ -196,6 +205,38 @@ policies/observability-and-reliability.md
 현재 Postgres backend도 검색 자체는 lexical overlap을 사용하며 `embedding` 컬럼은 vector/hybrid
 retrieval 전환을 위한 예약 필드입니다. 설치 대상 repository의 문서를 자동 수집하는 방식이
 아니라, 배포된 위 정책 세트를 공통 기준으로 사용합니다.
+
+### Review Harness
+
+리뷰에는 모든 정책을 넣지 않습니다. 서비스 소유 하네스가 diff와 CI에서 신호를 추출하고,
+관련 `SKILL.md` 절차와 정책 유형을 고른 뒤 배치마다 최대 2개 정책 chunk만 prompt에 전달합니다.
+선택된 skill 안에서는 path와 patch marker가 맞는 knowledge card만 추가해 필요한 증거와 오탐
+방지 조건을 전달합니다. 삭제 line은 선택 신호에서 제외하고, 입력 sink와 API breaking처럼 오탐
+비용이 큰 카드는 path와 patch 조건을 함께 요구합니다. PR 요약 댓글은 `변경 요약`,
+`변경 파일별 변경 요약`, `리뷰` 세 구역으로 출력됩니다.
+
+skill과 knowledge card는 하나 이상의 `source_id`를 가져야 합니다. 공식 출처 registry에 없는 ID,
+중복 ID, HTTPS가 아닌 출처, 증거·오탐 조건이 비어 있는 카드는 하네스 초기화 단계에서 거부합니다.
+외부 지식 카드는 검토 관점일 뿐 저장소 정책이 아니므로 `policy_source`로 인용하지 않습니다.
+
+```text
+review_harness/manifest.json
+review_harness/scripts/diff_signals.py
+review_harness/skills/*/SKILL.md
+review_harness/references/knowledge-cards.json
+review_harness/references/sources.json
+review_harness/evaluation/policy-selection-fixtures.json
+```
+
+하네스 선택 baseline은 다음 명령으로 재현합니다.
+
+```bash
+python -m review_harness.scripts.evaluate_harness
+```
+
+이 스크립트의 Recall은 skill·정책 선택 정확도이며, 최종 LLM finding의 정확도는 별도의
+오픈소스 PR snapshot 평가로 측정해야 합니다. 보안을 위해 설치 저장소가 제공하는 임의 script나
+skill은 실행하지 않고 서비스 image에 포함된 검증된 하네스만 실행합니다.
 
 ## GitHub App Webhook Integration
 

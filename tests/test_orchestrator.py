@@ -120,12 +120,91 @@ class OrchestratorTest(unittest.TestCase):
             )
 
             self.assertGreater(result.model_call.batch_count, 1)
+            self.assertEqual(len(result.summary.file_summaries), 8)
             self.assertEqual(
                 len([event for event, _ in events if event == "llm_batch_started"]),
                 result.model_call.batch_count,
             )
             completed = [payload for event, payload in events if event == "llm_call_completed"]
             self.assertEqual(completed[0]["batch_count"], result.model_call.batch_count)
+
+    def test_harness_signal_skill_policy_prompt_and_result_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            policy_root = tmp_path / "policies"
+            data_dir = tmp_path / "data"
+            policy_root.mkdir()
+            (policy_root / "security-policy.md").write_text(
+                "# Security Policy\n\n"
+                "## SEC-LOG\n\n"
+                "authorization token과 secret은 application log에 기록하지 않는다.\n",
+                encoding="utf-8",
+            )
+            settings = Settings(
+                policy_root=policy_root,
+                review_harness_root=Path("review_harness"),
+                local_data_dir=data_dir,
+                review_store_path=data_dir / "reviews.json",
+                comment_output_dir=data_dir / "comments",
+                llm_mode="mock",
+                publish_mode="local",
+            )
+            request = ReviewRequest.from_dict(
+                {
+                    "repository": {"owner": "team", "name": "repo"},
+                    "pull_request": {
+                        "number": 9,
+                        "title": "Prevent authorization token logging",
+                        "head_sha": "security-head",
+                    },
+                    "checks": [
+                        {"kind": "test", "status": "completed", "conclusion": "success"}
+                    ],
+                    "changed_files": [
+                        {
+                            "path": "backend/auth/token.py",
+                            "status": "modified",
+                            "additions": 1,
+                            "deletions": 1,
+                            "patch": (
+                                "@@ -10,1 +10,1 @@\n"
+                                "-logger.info(authorization)\n"
+                                "+logger.info('token validation completed')"
+                            ),
+                        }
+                    ],
+                }
+            )
+            events = []
+
+            result = create_orchestrator(settings).run_review(
+                request,
+                event_publisher=lambda event_type, payload: events.append((event_type, payload)),
+            )
+
+            harness_event = next(
+                payload for event, payload in events if event == "review_harness_selected"
+            )
+            batch_event = next(
+                payload for event, payload in events if event == "llm_batch_started"
+            )
+            skill_ids = {skill.skill_id for skill in result.review_harness.skills}
+
+            self.assertIn("security", harness_event["signals"])
+            self.assertIn("security-boundary", harness_event["skills"])
+            self.assertIn("secret-and-sensitive-log-flow", harness_event["knowledge_cards"])
+            self.assertIn("security-boundary", batch_event["skills"])
+            self.assertIn("secret-and-sensitive-log-flow", batch_event["knowledge_cards"])
+            self.assertTrue(
+                any("security-policy.md#SEC-LOG" == source for source in batch_event["policy_sources"])
+            )
+            self.assertIn("security-boundary", skill_ids)
+            self.assertEqual(result.retrieved_policies[0].policy_type, "security")
+            self.assertEqual(result.findings[0].policy_source, "security-policy.md#SEC-LOG")
+            published = next(settings.comment_output_dir.glob("*.md")).read_text(encoding="utf-8")
+            self.assertIn("### 변경 요약", published)
+            self.assertIn("### 변경 파일별 변경 요약", published)
+            self.assertIn("### 리뷰", published)
 
 
 if __name__ == "__main__":

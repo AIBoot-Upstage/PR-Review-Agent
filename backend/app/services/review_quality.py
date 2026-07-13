@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from typing import Any
 
-from backend.app.core.schemas import PolicyChunk, ReviewFinding, ReviewRequest, ReviewRoute
+from backend.app.core.schemas import (
+    PolicyChunk,
+    ReviewFinding,
+    ReviewKnowledgeCard,
+    ReviewRequest,
+    ReviewRoute,
+)
 
 ROUTE_MAX_FINDINGS = {
     "simple_failure_review": 3,
@@ -74,10 +81,12 @@ def validate_and_rank_findings(
     route: ReviewRoute,
     policies: list[PolicyChunk],
     findings: list[ReviewFinding],
-) -> tuple[list[ReviewFinding], dict[str, int]]:
+    knowledge_cards: list[ReviewKnowledgeCard] | None = None,
+) -> tuple[list[ReviewFinding], dict[str, Any]]:
     changed_files = {changed_file.path: changed_file for changed_file in request.changed_files}
     policy_sources = _canonical_policy_sources(policies)
-    report = {
+    cards_by_id = {card.card_id: card for card in knowledge_cards or []}
+    report: dict[str, Any] = {
         "received": len(findings),
         "accepted": 0,
         "unknown_file_dropped": 0,
@@ -85,6 +94,10 @@ def validate_and_rank_findings(
         "duplicate_dropped": 0,
         "invalid_line_removed": 0,
         "invalid_policy_source_removed": 0,
+        "missing_knowledge_card_dropped": 0,
+        "invalid_knowledge_card_dropped": 0,
+        "invalid_knowledge_card_ids": [],
+        "severity_capped_by_card": 0,
         "over_limit_dropped": 0,
     }
     accepted: list[ReviewFinding] = []
@@ -109,6 +122,22 @@ def validate_and_rank_findings(
             else:
                 policy_source = canonical_source
 
+        knowledge_card_id = finding.knowledge_card_id
+        if cards_by_id and not knowledge_card_id:
+            report["missing_knowledge_card_dropped"] += 1
+            continue
+        if knowledge_card_id:
+            card = cards_by_id.get(knowledge_card_id)
+            if card is None:
+                report["invalid_knowledge_card_dropped"] += 1
+                report["invalid_knowledge_card_ids"].append(knowledge_card_id)
+                continue
+            else:
+                severity_cap = SEVERITY_ALIASES.get(card.severity_cap.lower(), "medium")
+                if SEVERITY_ORDER[severity] < SEVERITY_ORDER[severity_cap]:
+                    severity = severity_cap
+                    report["severity_capped_by_card"] += 1
+
         line_start = finding.line_start
         line_end = finding.line_end
         if line_start is not None:
@@ -129,6 +158,7 @@ def validate_and_rank_findings(
             message=finding.message.strip(),
             suggestion=finding.suggestion.strip(),
             policy_source=policy_source,
+            knowledge_card_id=knowledge_card_id,
             confidence=max(0.0, min(float(finding.confidence), 1.0)),
         )
         key = _finding_key(normalized)
@@ -151,4 +181,7 @@ def validate_and_rank_findings(
         report["over_limit_dropped"] = len(accepted) - max_findings
         accepted = accepted[:max_findings]
     report["accepted"] = len(accepted)
+    report["invalid_knowledge_card_ids"] = sorted(
+        set(report["invalid_knowledge_card_ids"])
+    )
     return accepted, report

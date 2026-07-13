@@ -7,10 +7,12 @@ from typing import Any, TypedDict
 
 from backend.app.core.routing import extract_features, select_route
 from backend.app.core.schemas import (
+    FileChangeSummary,
     JsonDict,
     ModelCallUsage,
     PolicyChunk,
     PullRequestFeatures,
+    ReviewHarnessContext,
     ReviewFinding,
     ReviewRequest,
     ReviewResult,
@@ -18,6 +20,7 @@ from backend.app.core.schemas import (
     ReviewSummary,
 )
 from backend.app.services.llm import LLMClient
+from backend.app.services.policy_harness import PolicyHarness
 from backend.app.services.prompt_builder import ReviewPromptBatch, build_review_prompt_batches
 from backend.app.services.publisher import ReviewPublisher
 from backend.app.services.rag import LocalPolicyIndex
@@ -103,6 +106,7 @@ class ReviewWorkflowState(TypedDict, total=False):
     features: PullRequestFeatures
     route: ReviewRoute
     policies: list[PolicyChunk]
+    review_harness: ReviewHarnessContext
     prompt_batches: list[ReviewPromptBatch]
     summary: ReviewSummary
     findings: list[ReviewFinding]
@@ -123,12 +127,14 @@ class ReviewWorkflowGraph:
         llm_client: LLMClient,
         publisher: ReviewPublisher,
         store: ReviewStore,
+        policy_harness: PolicyHarness,
         event_publisher: Callable[[str, JsonDict | None], object] | None = None,
     ) -> None:
         self.policy_index = policy_index
         self.llm_client = llm_client
         self.publisher = publisher
         self.store = store
+        self.policy_harness = policy_harness
         self.event_publisher = event_publisher
         self.graph = self._build_graph()
 
@@ -146,6 +152,7 @@ class ReviewWorkflowGraph:
         graph.add_node("create_review", self._create_review)
         graph.add_node("extract_features", self._extract_features)
         graph.add_node("select_route", self._select_route)
+        graph.add_node("select_harness", self._select_harness)
         graph.add_node("retrieve_policies", self._retrieve_policies)
         graph.add_node("skip_policy_retrieval", self._skip_policy_retrieval)
         graph.add_node("build_prompt", self._build_prompt)
@@ -159,8 +166,9 @@ class ReviewWorkflowGraph:
         graph.add_edge(START, "create_review")
         graph.add_edge("create_review", "extract_features")
         graph.add_edge("extract_features", "select_route")
+        graph.add_edge("select_route", "select_harness")
         graph.add_conditional_edges(
-            "select_route",
+            "select_harness",
             self._policy_retrieval_path,
             {
                 "retrieve": "retrieve_policies",
@@ -210,9 +218,32 @@ class ReviewWorkflowGraph:
     def _policy_retrieval_path(self, state: ReviewWorkflowState) -> str:
         return "retrieve" if state["route"].use_rag else "skip"
 
+    def _select_harness(self, state: ReviewWorkflowState) -> JsonDict:
+        context = self.policy_harness.select(state["request"], state["route"])
+        self._publish(
+            "review_harness_selected",
+            {
+                "version": context.version,
+                "signals": sorted(context.signals),
+                "skills": [skill.skill_id for skill in context.skills],
+                "knowledge_cards": [card.card_id for card in context.knowledge_cards],
+                "policy_types": context.policy_types,
+                "candidate_policy_types": context.candidate_policy_types,
+            },
+        )
+        return {"review_harness": context}
+
     def _retrieve_policies(self, state: ReviewWorkflowState) -> JsonDict:
-        self._publish("policy_retrieval_started", {"top_k": 3})
-        policies = self.policy_index.search(state["request"], top_k=3)
+        context = state["review_harness"]
+        self._publish(
+            "policy_retrieval_started",
+            {"candidate_top_k": 8, "policy_types": context.candidate_policy_types},
+        )
+        policies = self.policy_index.search(
+            state["request"],
+            top_k=8,
+            policy_types=set(context.candidate_policy_types) or None,
+        )
         self._publish(
             "policy_retrieval_completed",
             {
@@ -231,6 +262,35 @@ class ReviewWorkflowGraph:
             state["request"],
             state["route"],
             state["policies"],
+            policy_harness=self.policy_harness,
+        )
+        selected_policies: dict[tuple[str, str], PolicyChunk] = {}
+        selected_skills = {}
+        selected_knowledge_cards = {}
+        for batch in batches:
+            for policy in batch.policies:
+                selected_policies[(policy.source_path, policy.section_title)] = policy
+            if batch.harness:
+                for skill in batch.harness.skills:
+                    selected_skills[skill.skill_id] = skill
+                for card in batch.harness.knowledge_cards:
+                    selected_knowledge_cards[card.card_id] = card
+        harness = state["review_harness"]
+        applied_harness = ReviewHarnessContext(
+            version=harness.version,
+            signals=harness.signals,
+            skills=list(selected_skills.values()) or harness.skills,
+            knowledge_cards=(
+                list(selected_knowledge_cards.values()) or harness.knowledge_cards
+            ),
+            policy_types=sorted(
+                {
+                    policy_type
+                    for skill in (list(selected_skills.values()) or harness.skills)
+                    for policy_type in skill.policy_types
+                }
+            ),
+            candidate_policy_types=harness.candidate_policy_types,
         )
         self._publish(
             "prompt_built",
@@ -238,9 +298,18 @@ class ReviewWorkflowGraph:
                 "batch_count": len(batches),
                 "selected_files": sum(len(batch.request.changed_files) for batch in batches),
                 "patch_chars": sum(batch.patch_chars for batch in batches),
+                "skills": [skill.skill_id for skill in applied_harness.skills],
+                "knowledge_cards": [
+                    card.card_id for card in applied_harness.knowledge_cards
+                ],
+                "policies_per_batch": [len(batch.policies) for batch in batches],
             },
         )
-        return {"prompt_batches": batches}
+        return {
+            "prompt_batches": batches,
+            "policies": list(selected_policies.values()),
+            "review_harness": applied_harness,
+        }
 
     def _call_llm(self, state: ReviewWorkflowState) -> JsonDict:
         route = state["route"]
@@ -261,6 +330,20 @@ class ReviewWorkflowGraph:
                     "batch_count": batch.count,
                     "files_count": len(batch.request.changed_files),
                     "patch_chars": batch.patch_chars,
+                    "skills": (
+                        [skill.skill_id for skill in batch.harness.skills]
+                        if batch.harness
+                        else []
+                    ),
+                    "knowledge_cards": (
+                        [card.card_id for card in batch.harness.knowledge_cards]
+                        if batch.harness
+                        else []
+                    ),
+                    "policy_sources": [
+                        f"{policy.source_path}#{policy.section_title}"
+                        for policy in batch.policies
+                    ],
                 },
             )
 
@@ -268,7 +351,7 @@ class ReviewWorkflowGraph:
             return self.llm_client.generate_review(
                 request=batch.request,
                 route=route,
-                policies=state["policies"],
+                policies=batch.policies,
                 messages=batch.messages,
                 review_run_id=state["review_run_id"],
                 batch_index=batch.index,
@@ -294,14 +377,27 @@ class ReviewWorkflowGraph:
         if len(batches) == 1:
             summary = representative
         else:
+            file_summaries_by_path: dict[str, FileChangeSummary] = {}
+            for batch_summary in summaries:
+                for file_summary in batch_summary.file_summaries:
+                    file_summaries_by_path.setdefault(file_summary.file_path, file_summary)
+            merged_change_summaries = list(
+                dict.fromkeys(
+                    batch_summary.change_summary.strip()
+                    for batch_summary in summaries
+                    if batch_summary.change_summary.strip()
+                )
+            )
+            change_summary = " ".join(merged_change_summaries)
+            if len(change_summary) > 1600:
+                change_summary = change_summary[:1597].rstrip() + "..."
             summary = ReviewSummary(
                 route_name=route.name,
                 model_tier=route.model_tier,
                 overall_risk=representative.overall_risk,
-                short_comment=(
-                    f"변경사항을 {len(batches)}개 묶음으로 나누어 검토했습니다. "
-                    f"대표 요약: {representative.short_comment}"
-                ),
+                short_comment=f"변경 파일 {len(file_summaries_by_path)}개를 검토했습니다.",
+                change_summary=change_summary,
+                file_summaries=list(file_summaries_by_path.values()),
             )
         usage = ModelCallUsage(
             provider=usages[0].provider,
@@ -346,6 +442,7 @@ class ReviewWorkflowGraph:
             route=state["route"],
             policies=state["policies"],
             findings=state["findings"],
+            knowledge_cards=state["review_harness"].knowledge_cards,
         )
         self._publish("findings_validated", report)
         return {"findings": findings, "finding_validation": report}
@@ -362,6 +459,7 @@ class ReviewWorkflowGraph:
             features=state["features"],
             model_call=state["usage"],
             retrieved_policies=state["policies"],
+            review_harness=state["review_harness"],
             finding_validation=state["finding_validation"],
         )
         return {"result": result}

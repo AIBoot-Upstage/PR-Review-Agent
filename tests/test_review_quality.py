@@ -1,6 +1,12 @@
 import unittest
 
-from backend.app.core.schemas import PolicyChunk, ReviewFinding, ReviewRequest, ReviewRoute
+from backend.app.core.schemas import (
+    PolicyChunk,
+    ReviewFinding,
+    ReviewKnowledgeCard,
+    ReviewRequest,
+    ReviewRoute,
+)
 from backend.app.services.review_quality import validate_and_rank_findings
 
 
@@ -34,6 +40,17 @@ class ReviewQualityTest(unittest.TestCase):
                 section_title="Secret logging",
                 content="Do not log tokens.",
                 policy_type="security",
+            )
+        ]
+        self.cards = [
+            ReviewKnowledgeCard(
+                card_id="secret-log-flow",
+                title="Secret log flow",
+                skill_id="security-boundary",
+                check="Check token logging.",
+                evidence_required="A token and logging sink.",
+                false_positive_guard="Ignore redacted values.",
+                severity_cap="medium",
             )
         ]
 
@@ -92,6 +109,42 @@ class ReviewQualityTest(unittest.TestCase):
         self.assertIsNone(findings[0].policy_source)
         self.assertEqual(report["invalid_line_removed"], 1)
         self.assertEqual(report["invalid_policy_source_removed"], 1)
+
+    def test_validates_card_id_and_enforces_card_severity_cap(self):
+        findings, report = validate_and_rank_findings(
+            self.request,
+            self.route,
+            self.policies,
+            [
+                self._finding(knowledge_card_id="secret-log-flow"),
+                self._finding(
+                    message="Second issue.",
+                    knowledge_card_id="invented-card",
+                ),
+            ],
+            knowledge_cards=self.cards,
+        )
+
+        findings_by_message = {finding.message: finding for finding in findings}
+        capped = findings_by_message["Token is logged."]
+        self.assertEqual(capped.severity, "medium")
+        self.assertEqual(capped.knowledge_card_id, "secret-log-flow")
+        self.assertNotIn("Second issue.", findings_by_message)
+        self.assertEqual(report["severity_capped_by_card"], 1)
+        self.assertEqual(report["invalid_knowledge_card_dropped"], 1)
+        self.assertEqual(report["invalid_knowledge_card_ids"], ["invented-card"])
+
+    def test_drops_finding_without_card_when_harness_cards_are_selected(self):
+        findings, report = validate_and_rank_findings(
+            self.request,
+            self.route,
+            self.policies,
+            [self._finding(knowledge_card_id=None)],
+            knowledge_cards=self.cards,
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(report["missing_knowledge_card_dropped"], 1)
 
 
 if __name__ == "__main__":

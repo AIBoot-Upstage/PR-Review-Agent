@@ -120,6 +120,7 @@ flowchart TB
 | Review API | GitHub App webhook과 내부 리뷰 실행 요청을 받는 API |
 | Background Task | 현재 FastAPI process 안에서 LangGraph 리뷰를 실행한다. durable queue는 후속 과제다. |
 | Policy Service | 배포된 공통 정책 문서 indexing과 lexical top-k 검색 담당 |
+| Policy Harness | 신뢰된 diff 신호 script로 skill과 batch별 정책 유형을 선택 |
 | Routing Service | test/lint 실패로 low/medium을 결정하고 위험 신호로 선택적 high를 권고 |
 | LLM Service | LiteLLM을 통해 Solar3 API를 호출하고 토큰, 지연시간, Langfuse trace 기록 |
 | Publish Service | GitHub API를 통해 comment/check run을 작성 |
@@ -132,16 +133,19 @@ flowchart TB
 create_review
  -> extract_features
  -> select_route
+ -> select_harness
  -> retrieve_policies 또는 skip_policy_retrieval
  -> build_prompt
  -> call_llm
+ -> validate_findings
  -> assemble_result
  -> persist_result
  -> publish_comment
  -> complete_review
 ```
 
-`select_route` 이후에는 route의 `use_rag` 값에 따라 policy retrieval node로 분기한다.
+`select_route` 이후 `select_harness`가 관련 skill과 정책 유형을 정하고, route의 `use_rag` 값에
+따라 policy retrieval node로 분기한다.
 각 node는 SSE event를 발행하므로 UI 또는 로그에서 review_run 단위 실행 단계를 추적할 수 있다.
 
 ## 5. 라우팅 설계
@@ -197,6 +201,23 @@ def select_route(features: PullRequestFeatures, review_mode: str) -> ReviewRoute
     )
 ```
 
+### 정책 하네스 지식 계약
+
+하네스의 외부 검토 지식과 설치 저장소의 정책은 분리한다. 외부 지식은 공식 source registry에서
+검증된 일반 검토 관점이고, 저장소 정책은 해당 repository의 규범이며 finding의
+`policy_source`로 인용할 수 있다.
+
+| 자산 | 핵심 필드 | prompt 사용 |
+| --- | --- | --- |
+| Source | ID, 기관, 제목, HTTPS URL, topic, 정제 용도 | 원문·URL은 넣지 않음 |
+| Skill | ID, route, signal, policy type, source IDs | 선택된 절차만 넣음 |
+| Knowledge Card | skill ID, marker, check, evidence, false-positive guard, severity cap, source IDs | 선택된 카드만 넣음 |
+| Repository Policy | source path/SHA, section, content, policy type | 검색된 batch top-2만 넣음 |
+
+Source가 없거나 registry에 없는 ID를 참조하는 skill/card, 중복 ID, 필수 증거·오탐 필드가 빈
+카드는 `PolicyHarness` 초기화에서 거부한다. 카드가 선택돼도 모델은 diff에서 `evidence_required`를
+확인하고 `false_positive_guard`를 통과해야 하며, 카드 source ID를 정책 인용으로 출력할 수 없다.
+
 ## 6. RAG 설계
 
 ### 인덱싱 대상
@@ -227,7 +248,7 @@ def select_route(features: PullRequestFeatures, review_mode: str) -> ReviewRoute
 
 1. PR diff summary와 변경 파일 경로를 query로 구성한다.
 2. check summary와 제한된 patch token을 query에 추가한다.
-3. Postgres의 policy chunk를 읽어 token overlap score로 top-3를 선택한다.
+3. 신뢰된 diff script가 관련 skill과 정책 유형을 선택하고 token overlap score로 batch별 top-2를 선택한다.
 4. overlap이 없는 정책은 임의 fallback으로 반환하지 않는다.
 5. medium과 사용자 요청 high 경로에만 RAG context를 주입한다.
 6. prompt에는 source path, section title, retrieval score를 넣고 finding에는 canonical `policy_source`를 요구한다.

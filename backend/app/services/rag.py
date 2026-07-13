@@ -108,13 +108,20 @@ def _query_tokens(request: ReviewRequest) -> set[str]:
     return _tokens("\n".join(query_parts))
 
 
-def _score_chunks(chunks: list[PolicyChunk], request: ReviewRequest, top_k: int) -> list[PolicyChunk]:
+def rank_policy_chunks(
+    chunks: list[PolicyChunk],
+    request: ReviewRequest,
+    top_k: int,
+    policy_types: set[str] | None = None,
+) -> list[PolicyChunk]:
     if not chunks:
         return []
 
     query_tokens = _query_tokens(request)
     scored: list[PolicyChunk] = []
     for chunk in chunks:
+        if policy_types and chunk.policy_type not in policy_types:
+            continue
         chunk_tokens = _tokens(f"{chunk.source_path} {chunk.section_title} {chunk.content}")
         overlap = query_tokens & chunk_tokens
         if not overlap:
@@ -176,9 +183,14 @@ class LocalPolicyIndex:
             "indexed_chunks": len(chunks),
         }
 
-    def search(self, request: ReviewRequest, top_k: int = 5) -> list[PolicyChunk]:
+    def search(
+        self,
+        request: ReviewRequest,
+        top_k: int = 5,
+        policy_types: set[str] | None = None,
+    ) -> list[PolicyChunk]:
         chunks = self.load_chunks()
-        return _score_chunks(chunks, request, top_k)
+        return rank_policy_chunks(chunks, request, top_k, policy_types)
 
 
 class PostgresPolicyIndex(LocalPolicyIndex):
@@ -300,12 +312,17 @@ class PostgresPolicyIndex(LocalPolicyIndex):
             return self.sync()["indexed_chunks"] > 0
         return count > 0
 
-    def search(self, request: ReviewRequest, top_k: int = 5) -> list[PolicyChunk]:
+    def search(
+        self,
+        request: ReviewRequest,
+        top_k: int = 5,
+        policy_types: set[str] | None = None,
+    ) -> list[PolicyChunk]:
         chunks = self._load_indexed_chunks()
         if not chunks and self._candidate_files():
             self.sync()
             chunks = self._load_indexed_chunks()
-        return _score_chunks(chunks, request, top_k)
+        return rank_policy_chunks(chunks, request, top_k, policy_types)
 
 
 def create_policy_index(settings: Settings) -> LocalPolicyIndex:

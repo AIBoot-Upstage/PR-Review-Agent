@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Protocol
 
 from backend.app.core.config import Settings
 from backend.app.core.schemas import (
+    ChangedFilePayload,
+    FileChangeSummary,
     ModelCallUsage,
     PolicyChunk,
     ReviewFinding,
@@ -43,6 +46,77 @@ def _line_for_first_file(request: ReviewRequest) -> int | None:
     return 1
 
 
+def _fallback_file_change_summary(changed_file: ChangedFilePayload) -> str:
+    status_labels = {
+        "added": "새 파일 추가",
+        "removed": "파일 삭제",
+        "renamed": "파일 이름 변경",
+        "modified": "파일 수정",
+    }
+    status = status_labels.get(changed_file.status.lower(), changed_file.status or "파일 수정")
+    return f"{status}: {changed_file.additions}줄 추가, {changed_file.deletions}줄 삭제"
+
+
+KOREAN_PATTERN = re.compile(r"[가-힣]")
+
+
+def _korean_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if KOREAN_PATTERN.search(text) else ""
+
+
+def _file_summaries_from_payload(
+    payload: Any,
+    request: ReviewRequest,
+) -> list[FileChangeSummary]:
+    allowed_files = {changed_file.path: changed_file for changed_file in request.changed_files}
+    parsed: dict[str, str] = {}
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file_path") or "").strip()
+            change_summary = _korean_text(
+                item.get("change_summary") or item.get("summary") or ""
+            )
+            if file_path in allowed_files and change_summary and file_path not in parsed:
+                parsed[file_path] = change_summary
+
+    return [
+        FileChangeSummary(
+            file_path=changed_file.path,
+            change_summary=parsed.get(
+                changed_file.path,
+                _fallback_file_change_summary(changed_file),
+            ),
+        )
+        for changed_file in request.changed_files
+    ]
+
+
+def _fallback_change_summary(request: ReviewRequest) -> str:
+    additions = sum(changed_file.additions for changed_file in request.changed_files)
+    deletions = sum(changed_file.deletions for changed_file in request.changed_files)
+    return (
+        f"변경 파일 {len(request.changed_files)}개에서 "
+        f"{additions}줄을 추가하고 {deletions}줄을 삭제했습니다."
+    )
+
+
+def _first_harness_card_id(messages: list[dict[str, str]]) -> str | None:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except json.JSONDecodeError:
+            continue
+        cards = (payload.get("review_harness") or {}).get("knowledge_cards") or []
+        if cards and isinstance(cards[0], dict):
+            return str(cards[0].get("card_id") or "") or None
+    return None
+
+
 class MockLLMClient:
     """Deterministic local reviewer used for development and tests."""
 
@@ -63,12 +137,16 @@ class MockLLMClient:
         findings: list[ReviewFinding] = []
         file_path = _first_changed_path(request)
         line = _line_for_first_file(request)
+        knowledge_card_id = _first_harness_card_id(messages)
 
         if route.name == "simple_failure_review":
             failed_checks = [check for check in request.checks if check.is_failed]
-            summary_text = "One or more checks failed. Review the failing log before merging."
+            summary_text = "하나 이상의 체크가 실패했습니다. 병합 전에 실패 로그를 확인해야 합니다."
             if failed_checks:
-                summary_text = f"{failed_checks[0].kind} failed: {failed_checks[0].summary[:160]}"
+                summary_text = (
+                    f"{failed_checks[0].kind} 체크가 실패했습니다: "
+                    f"{failed_checks[0].summary[:160]}"
+                )
             findings.append(
                 ReviewFinding(
                     severity="high",
@@ -76,9 +154,10 @@ class MockLLMClient:
                     file_path=file_path,
                     line_start=line,
                     line_end=line,
-                    message="The PR has a failing check, so the first priority is to fix CI.",
-                    suggestion="Open the failing check log and verify the changed file related to the error.",
+                    message="PR 체크가 실패해 현재 변경을 정상적으로 검증할 수 없습니다.",
+                    suggestion="실패한 체크 로그를 열고 오류와 연결된 변경 파일부터 수정합니다.",
                     evidence={"failed_checks": [check.kind for check in failed_checks]},
+                    knowledge_card_id=knowledge_card_id,
                     confidence=0.88,
                 )
             )
@@ -92,13 +171,14 @@ class MockLLMClient:
                     file_path=file_path,
                     line_start=line,
                     line_end=line,
-                    message="This change touches a high-risk area or has a large diff.",
+                    message="변경 범위가 크거나 운영 영향이 있는 코드 경로를 수정했습니다.",
                     suggestion=(
-                        "Ask for an additional human review focused on authorization, data consistency, "
-                        "rollback behavior, and production observability."
+                        "권한, 데이터 일관성, 롤백 동작과 운영 관측성을 중심으로 "
+                        "추가 사람 리뷰를 수행합니다."
                     ),
                     evidence={"route_reasons": route.reasons},
                     policy_source=policies[0].source_path if policies else None,
+                    knowledge_card_id=knowledge_card_id,
                     confidence=0.78,
                 )
             )
@@ -113,16 +193,17 @@ class MockLLMClient:
                         file_path=file_path,
                         line_start=line,
                         line_end=line,
-                        message="Repository policy context is relevant to this PR.",
+                        message="저장소 정책과 직접 관련된 변경이 포함되어 있습니다.",
                         suggestion=(
-                            "Compare the changed code with the referenced policy section and adjust naming, "
-                            "tests, or API behavior if they diverge."
+                            "변경 코드를 참고 정책과 비교하고 불일치하는 테스트나 API 동작을 "
+                            "정책에 맞게 수정합니다."
                         ),
                         evidence={
                             "section_title": policy.section_title,
                             "policy_score": policy.score,
                         },
                         policy_source=f"{policy.source_path}#{policy.section_title}",
+                        knowledge_card_id=knowledge_card_id,
                         confidence=0.74,
                     )
                 )
@@ -134,8 +215,9 @@ class MockLLMClient:
                         file_path=file_path,
                         line_start=line,
                         line_end=line,
-                        message="No repository policy was available, so only a general review was generated.",
-                        suggestion="Add policies under POLICY_ROOT (default policies/) for stronger review context.",
+                        message="저장소 정책이 없어 일반 변경 정보만 검토했습니다.",
+                        suggestion="구체적인 기준이 필요하면 POLICY_ROOT에 저장소 정책을 추가합니다.",
+                        knowledge_card_id=knowledge_card_id,
                         confidence=0.62,
                     )
                 )
@@ -155,9 +237,13 @@ class MockLLMClient:
             route_name=route.name,
             model_tier=route.model_tier,
             overall_risk=risk,
-            short_comment=summary_text if route.name == "simple_failure_review" else (
-                f"{route.name} completed with {len(findings)} finding(s)."
+            short_comment=(
+                summary_text
+                if route.name == "simple_failure_review"
+                else f"변경 파일 {len(request.changed_files)}개를 검토했습니다."
             ),
+            change_summary=_fallback_change_summary(request),
+            file_summaries=_file_summaries_from_payload([], request),
         )
         return summary, findings, usage
 
@@ -210,6 +296,7 @@ class LiteLLMClient:
         model = self.settings.model_for_tier(route.model_tier)
         litellm_model = _litellm_model_id(model, self.settings.upstage_api_base_url)
         reasoning_effort = self.settings.reasoning_effort_for_tier(route.model_tier)
+        max_tokens = self.settings.max_tokens_for_tier(route.model_tier)
         completion_kwargs: dict[str, Any] = {
             "model": litellm_model,
             "messages": messages,
@@ -217,6 +304,7 @@ class LiteLLMClient:
             "api_base": self.settings.upstage_api_base_url,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
+            "max_tokens": max_tokens,
             "timeout": 90,
             "metadata": {
                 "review_run_id": review_run_id,
@@ -226,6 +314,7 @@ class LiteLLMClient:
                 "pull_request_number": request.pull_request.number,
                 "batch_index": batch_index,
                 "batch_count": batch_count,
+                "max_tokens": max_tokens,
             },
         }
         if reasoning_effort:
@@ -245,14 +334,32 @@ class LiteLLMClient:
         parsed = _parse_json(content)
 
         summary_payload = parsed.get("summary", {})
+        if not isinstance(summary_payload, dict):
+            summary_payload = {}
         findings_payload = parsed.get("findings", [])
+        file_summaries = _file_summaries_from_payload(
+            summary_payload.get("file_summaries"),
+            request,
+        )
+        change_summary = _korean_text(summary_payload.get("change_summary"))
+        if not change_summary:
+            change_summary = _korean_text(summary_payload.get("short_comment"))
+        if not change_summary:
+            change_summary = _fallback_change_summary(request)
+        short_comment = _korean_text(summary_payload.get("short_comment")) or change_summary
         summary = ReviewSummary(
             route_name=route.name,
             model_tier=route.model_tier,
             overall_risk=str(summary_payload.get("overall_risk", "medium")),
-            short_comment=str(summary_payload.get("short_comment", "Review completed.")),
+            short_comment=short_comment,
+            change_summary=change_summary,
+            file_summaries=file_summaries,
         )
-        findings = [_finding_from_payload(item) for item in findings_payload]
+        findings = [
+            _finding_from_payload(item)
+            for item in findings_payload
+            if isinstance(item, dict)
+        ]
         usage_payload = getattr(response, "usage", None)
         usage = ModelCallUsage(
             provider="upstage",
@@ -314,6 +421,7 @@ def _finding_from_payload(payload: dict[str, Any]) -> ReviewFinding:
         suggestion=str(payload.get("suggestion", "")),
         evidence=payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
         policy_source=payload.get("policy_source"),
+        knowledge_card_id=payload.get("knowledge_card_id"),
         confidence=float(payload.get("confidence", 0.7) or 0.7),
     )
 

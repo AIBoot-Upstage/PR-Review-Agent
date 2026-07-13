@@ -5,6 +5,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = "local"
@@ -32,6 +45,10 @@ class Settings:
     solar3_low_reasoning_effort: str = "low"
     solar3_medium_reasoning_effort: str = "medium"
     solar3_high_reasoning_effort: str = "high"
+    solar3_low_max_tokens: int = 4096
+    solar3_medium_max_tokens: int = 8192
+    solar3_high_max_tokens: int = 16384
+    review_harness_root: Path = Path("review_harness")
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
     langfuse_host: str = "https://cloud.langfuse.com"
@@ -82,6 +99,10 @@ class Settings:
                 or "medium"
             ),
             solar3_high_reasoning_effort=os.getenv("SOLAR3_HIGH_REASONING_EFFORT", "high"),
+            solar3_low_max_tokens=_positive_int_env("SOLAR3_LOW_MAX_TOKENS", 4096),
+            solar3_medium_max_tokens=_positive_int_env("SOLAR3_MEDIUM_MAX_TOKENS", 8192),
+            solar3_high_max_tokens=_positive_int_env("SOLAR3_HIGH_MAX_TOKENS", 16384),
+            review_harness_root=Path(os.getenv("REVIEW_HARNESS_ROOT", "review_harness")),
             langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
             langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
             langfuse_host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
@@ -100,3 +121,10 @@ class Settings:
         if model_tier == "solar3-high":
             return self.solar3_high_reasoning_effort
         return self.solar3_medium_reasoning_effort
+
+    def max_tokens_for_tier(self, model_tier: str) -> int:
+        if model_tier == "solar3-low":
+            return self.solar3_low_max_tokens
+        if model_tier == "solar3-high":
+            return self.solar3_high_max_tokens
+        return self.solar3_medium_max_tokens

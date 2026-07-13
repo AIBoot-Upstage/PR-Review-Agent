@@ -25,6 +25,23 @@ REVIEW_TYPE_LABELS = {
     "deep_quality_review": "심층 품질 리뷰",
 }
 
+CATEGORY_LABELS = {
+    "functional_correctness": "기능 정확성",
+    "security": "보안",
+    "data_integrity": "데이터 무결성",
+    "reliability": "신뢰성",
+    "performance": "성능",
+    "test": "테스트",
+    "api_contract": "API 계약",
+    "architecture": "아키텍처",
+    "time_complexity": "시간 복잡도",
+    "space_complexity": "공간 복잡도",
+    "simplification": "코드 간소화",
+    "maintainability": "유지보수성",
+    "failure": "실패 원인",
+    "style": "코드 품질",
+}
+
 ROUTE_REASON_LABELS = {
     "syntax, lint, or test failed": "문법, 린트 또는 테스트 실패가 감지됨",
     "manual deep review requested": "사용자가 심층 리뷰를 직접 요청함",
@@ -66,7 +83,7 @@ def _supports_manual_deep_review(result: ReviewResult) -> bool:
 
 
 def _finding_markdown(finding: ReviewFinding, *, include_location: bool = True) -> str:
-    heading = f"**{finding.severity} / {finding.category}**"
+    heading = f"**{CATEGORY_LABELS.get(finding.category, finding.category)}**"
     if include_location:
         location = finding.file_path
         if finding.line_start:
@@ -81,7 +98,13 @@ def _finding_markdown(finding: ReviewFinding, *, include_location: bool = True) 
         lines.extend(["", f"**영향:** {consequence}"])
     if finding.policy_source:
         lines.extend(["", f"**참고 정책:** `{finding.policy_source}`"])
+    if finding.knowledge_card_id:
+        lines.extend(["", f"**검토 기준:** `{finding.knowledge_card_id}`"])
     return "\n".join(lines)
+
+
+def _table_cell(value: str) -> str:
+    return " ".join(value.splitlines()).replace("|", "\\|").strip()
 
 
 def format_review_markdown(
@@ -93,15 +116,23 @@ def format_review_markdown(
     lines = [
         "## AI Code Review",
         "",
-        f"- 리뷰 유형: `{_review_type_label(result)}`",
-        f"- 선택 사유: {_route_reason_summary(result)}",
-        f"- 처리 방식: `{_review_context_label(result)}`",
-        f"- 사용 모델: `{result.model_call.model}`",
-        f"- 위험도: `{result.summary.overall_risk}`",
-        f"- 요약: {result.summary.short_comment}",
+        "### 변경 요약",
         "",
-        "### 리뷰 결과",
+        result.summary.change_summary or result.summary.short_comment,
+        "",
+        "### 변경 파일별 변경 요약",
+        "",
+        "| 파일 | 변경 내용 |",
+        "| --- | --- |",
     ]
+    if result.summary.file_summaries:
+        lines.extend(
+            f"| `{_table_cell(item.file_path)}` | {_table_cell(item.change_summary)} |"
+            for item in result.summary.file_summaries
+        )
+    else:
+        lines.append("| - | 변경 파일 요약이 없습니다. |")
+    lines.extend(["", "### 리뷰"])
     if _supports_manual_deep_review(result):
         lines.extend(
             [
@@ -119,7 +150,7 @@ def format_review_markdown(
         )
     if not rendered_findings and not inline_findings_count:
         lines.append("")
-        lines.append("생성된 리뷰 결과가 없습니다.")
+        lines.append("추가로 지적할 문제가 없습니다.")
     for index, finding in enumerate(rendered_findings, start=1):
         lines.extend(
             [

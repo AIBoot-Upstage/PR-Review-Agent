@@ -6,6 +6,7 @@ from collections.abc import Callable
 from backend.app.core.config import Settings
 from backend.app.core.schemas import JsonDict, ReviewRequest, ReviewResult
 from backend.app.services.llm import LLMClient, create_llm_client
+from backend.app.services.policy_harness import PolicyHarness
 from backend.app.services.publisher import ReviewPublisher, create_publisher
 from backend.app.services.rag import LocalPolicyIndex, create_policy_index
 from backend.app.services.review_graph import ReviewWorkflowGraph
@@ -19,11 +20,13 @@ class ReviewOrchestrator:
         llm_client: LLMClient,
         publisher: ReviewPublisher,
         store: ReviewStore,
+        policy_harness: PolicyHarness | None = None,
     ) -> None:
         self.policy_index = policy_index
         self.llm_client = llm_client
         self.publisher = publisher
         self.store = store
+        self.policy_harness = policy_harness or PolicyHarness(Settings().review_harness_root)
 
     def run_review(
         self,
@@ -43,6 +46,7 @@ class ReviewOrchestrator:
                 llm_client=self.llm_client,
                 publisher=self.publisher,
                 store=self.store,
+                policy_harness=self.policy_harness,
                 event_publisher=publish,
             ).run(
                 request=request,
@@ -66,4 +70,5 @@ def create_orchestrator(settings: Settings | None = None) -> ReviewOrchestrator:
         llm_client=create_llm_client(resolved_settings),
         publisher=create_publisher(resolved_settings),
         store=create_review_store(resolved_settings),
+        policy_harness=PolicyHarness(resolved_settings.review_harness_root),
     )

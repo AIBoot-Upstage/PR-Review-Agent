@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.core.schemas import (
+    FileChangeSummary,
     GitHubPayload,
     ModelCallUsage,
     PullRequestFeatures,
@@ -55,6 +56,13 @@ def _review_result(route_name="policy_context_review"):
             model_tier=route.model_tier,
             overall_risk="medium",
             short_comment="리뷰가 완료되었습니다.",
+            change_summary="API 응답 계약과 검증 테스트를 변경했습니다.",
+            file_summaries=[
+                FileChangeSummary(
+                    file_path="app/api.py",
+                    change_summary="응답에 상태 필드를 추가했습니다.",
+                )
+            ],
         ),
         findings=[],
         route=route,
@@ -77,14 +85,20 @@ def _review_result(route_name="policy_context_review"):
 
 
 class PublisherTest(unittest.TestCase):
-    def test_review_markdown_hides_internal_tier_and_mentions_checks_button(self):
+    def test_review_markdown_uses_change_summary_file_table_and_review_sections(self):
         markdown = format_review_markdown(_review_result())
 
-        self.assertIn("- 리뷰 유형:", markdown)
+        headings = ["### 변경 요약", "### 변경 파일별 변경 요약", "### 리뷰"]
+        self.assertEqual([heading for heading in headings if heading in markdown], headings)
+        self.assertLess(markdown.index(headings[0]), markdown.index(headings[1]))
+        self.assertLess(markdown.index(headings[1]), markdown.index(headings[2]))
+        self.assertIn("| `app/api.py` | 응답에 상태 필드를 추가했습니다. |", markdown)
         self.assertIn("GitHub Checks 화면", markdown)
         self.assertNotIn("Review tier", markdown)
         self.assertNotIn("Reasoning effort", markdown)
         self.assertNotIn("solar3-medium", markdown)
+        self.assertNotIn("위험도", markdown)
+        self.assertNotIn("중요도", markdown)
 
     def test_standard_review_check_run_includes_deep_review_action(self):
         app_client = FakeGitHubAppClient()
@@ -132,6 +146,26 @@ class PublisherTest(unittest.TestCase):
 
         self.assertIn("1개 항목은 diff inline comment", markdown)
         self.assertNotIn("Empty input raises", markdown)
+
+    def test_review_heading_uses_category_without_abstract_severity(self):
+        result = _review_result()
+        finding = ReviewFinding(
+            severity="high",
+            category="functional_correctness",
+            file_path="app/service.py",
+            line_start=None,
+            line_end=None,
+            message="빈 입력에서 예외가 발생합니다.",
+            suggestion="인덱싱 전에 빈 결과를 반환합니다.",
+            knowledge_card_id="behavior-edge-and-failure-path",
+        )
+        result = ReviewResult(**{**result.__dict__, "findings": [finding]})
+
+        markdown = format_review_markdown(result)
+
+        self.assertIn("**기능 정확성** - `app/service.py`", markdown)
+        self.assertIn("**검토 기준:** `behavior-edge-and-failure-path`", markdown)
+        self.assertNotIn("high /", markdown)
 
     def test_posts_validated_findings_as_pull_request_review_comments(self):
         publisher = GitHubPublisher(token="token")

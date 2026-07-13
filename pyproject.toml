@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["backend*"]
+include = ["backend*", "review_harness*"]
 
 [tool.ruff]
 line-length = 100

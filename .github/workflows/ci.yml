@@ -29,6 +29,9 @@ jobs:
       - name: Local smoke review
         run: python -m backend.app.cli sample-data/review-request.json --sync-policies
 
+      - name: Review harness fixture benchmark
+        run: python -m review_harness.scripts.evaluate_harness
+
   test:
     runs-on: ubuntu-latest
     steps:
