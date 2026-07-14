@@ -7,12 +7,17 @@ from backend.app.core.schemas import (
     FileChangeSummary,
     GitHubPayload,
     ModelCallUsage,
+    PolicyChunk,
     PullRequestFeatures,
     PullRequestPayload,
     RepositoryPayload,
+    ReviewHarnessContext,
+    ReviewKnowledgeCard,
     ReviewRequest,
     ReviewResult,
     ReviewRoute,
+    ReviewSkill,
+    ReviewSourceReference,
     ReviewSummary,
     ReviewFinding,
 )
@@ -180,6 +185,98 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("**기능 정확성** - `app/service.py`", markdown)
         self.assertIn("**검토 기준:** `behavior-edge-and-failure-path`", markdown)
         self.assertNotIn("high /", markdown)
+
+    def test_evidence_section_lists_applied_skills_policies_and_knowledge_cards(self):
+        card = ReviewKnowledgeCard(
+            card_id="secret-and-sensitive-log-flow",
+            title="Secret 로그 유출",
+            skill_id="security-boundary",
+            check="check",
+            evidence_required="evidence",
+            false_positive_guard="guard",
+            severity_cap="medium",
+            sources=[
+                ReviewSourceReference(
+                    source_id="owasp-logging",
+                    title="Logging Cheat Sheet",
+                    url="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+                    authority="OWASP",
+                )
+            ],
+        )
+        skill = ReviewSkill(
+            skill_id="security-boundary",
+            title="보안 경계",
+            instructions="instructions",
+        )
+        harness = ReviewHarnessContext(version="1.0", skills=[skill], knowledge_cards=[card])
+        policy = PolicyChunk(
+            source_path="policies/security-and-privacy.md",
+            section_title="Secret 마스킹",
+            content="content",
+        )
+        result = _review_result()
+        result = ReviewResult(
+            **{
+                **result.__dict__,
+                "review_harness": harness,
+                "retrieved_policies": [policy],
+            }
+        )
+
+        markdown = format_review_markdown(result)
+
+        self.assertIn("### 리뷰 근거", markdown)
+        self.assertIn("**적용된 검토 절차**: 보안 경계", markdown)
+        self.assertIn("`policies/security-and-privacy.md#Secret 마스킹`", markdown)
+        self.assertIn(
+            "Secret 로그 유출 (출처: [Logging Cheat Sheet]"
+            "(https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html))",
+            markdown,
+        )
+
+    def test_finding_resolves_knowledge_card_title_and_source_link(self):
+        card = ReviewKnowledgeCard(
+            card_id="secret-and-sensitive-log-flow",
+            title="Secret 로그 유출",
+            skill_id="security-boundary",
+            check="check",
+            evidence_required="evidence",
+            false_positive_guard="guard",
+            severity_cap="medium",
+            sources=[
+                ReviewSourceReference(
+                    source_id="owasp-logging",
+                    title="Logging Cheat Sheet",
+                    url="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+                    authority="OWASP",
+                )
+            ],
+        )
+        harness = ReviewHarnessContext(version="1.0", knowledge_cards=[card])
+        finding = ReviewFinding(
+            severity="high",
+            category="security",
+            file_path="app/service.py",
+            line_start=None,
+            line_end=None,
+            message="토큰이 그대로 로그에 남습니다.",
+            suggestion="로그 남기기 전에 토큰을 마스킹합니다.",
+            knowledge_card_id="secret-and-sensitive-log-flow",
+        )
+        result = _review_result()
+        result = ReviewResult(
+            **{**result.__dict__, "review_harness": harness, "findings": [finding]}
+        )
+
+        markdown = format_review_markdown(result, findings=[finding])
+
+        self.assertIn(
+            "**검토 기준:** Secret 로그 유출 (출처: [Logging Cheat Sheet]"
+            "(https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)) "
+            "(`secret-and-sensitive-log-flow`)",
+            markdown,
+        )
 
     def test_posts_validated_findings_as_pull_request_review_comments(self):
         publisher = GitHubPublisher(token="token")
