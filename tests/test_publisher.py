@@ -1,17 +1,23 @@
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.app.core.schemas import (
     FileChangeSummary,
     GitHubPayload,
     ModelCallUsage,
+    PolicyChunk,
     PullRequestFeatures,
     PullRequestPayload,
     RepositoryPayload,
+    ReviewHarnessContext,
+    ReviewKnowledgeCard,
     ReviewRequest,
     ReviewResult,
     ReviewRoute,
+    ReviewSkill,
+    ReviewSourceReference,
     ReviewSummary,
     ReviewFinding,
 )
@@ -20,11 +26,22 @@ from backend.app.services.publisher import GitHubPublisher, format_review_markdo
 
 class FakeGitHubAppClient:
     def __init__(self):
+        self.settings = SimpleNamespace(github_app_id="4252630")
         self.payload = None
+        self.comments = []
+        self.requests = []
 
     def update_check_run(self, owner, repo, check_run_id, token, payload):
         self.payload = payload
         return {"id": check_run_id, "html_url": "https://github.com/team/repo/runs/1"}
+
+    def paginated_get(self, path, token):
+        self.requests.append(("GET", path, token, None))
+        return self.comments
+
+    def request_json(self, method, path, token, data=None):
+        self.requests.append((method, path, token, data))
+        return {"id": 88, "html_url": "https://github.com/team/repo/pull/7#comment-88"}
 
 
 class FakeResponse:
@@ -88,7 +105,7 @@ class PublisherTest(unittest.TestCase):
     def test_review_markdown_uses_change_summary_file_table_and_review_sections(self):
         markdown = format_review_markdown(_review_result())
 
-        headings = ["### 변경 요약", "### 변경 파일별 변경 요약", "### 리뷰"]
+        headings = ["### 변경 요약", "### 파일별 변경 요약", "### 리뷰"]
         self.assertEqual([heading for heading in headings if heading in markdown], headings)
         self.assertLess(markdown.index(headings[0]), markdown.index(headings[1]))
         self.assertLess(markdown.index(headings[1]), markdown.index(headings[2]))
@@ -125,7 +142,7 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(app_client.payload["actions"][0]["label"], "심층 리뷰 실행")
         self.assertEqual(app_client.payload["actions"][0]["identifier"], "run_deep_review")
 
-    def test_summary_mentions_inline_findings_without_repeating_them(self):
+    def test_summary_keeps_inline_findings_in_review_section(self):
         result = _review_result()
         inline_finding = ReviewFinding(
             severity="high",
@@ -133,8 +150,8 @@ class PublisherTest(unittest.TestCase):
             file_path="app/service.py",
             line_start=10,
             line_end=10,
-            message="Empty input raises an exception.",
-            suggestion="Return an empty result before indexing.",
+            message="빈 입력에서 예외가 발생합니다.",
+            suggestion="인덱싱 전에 빈 결과를 반환합니다.",
         )
         result = ReviewResult(
             **{
@@ -143,10 +160,11 @@ class PublisherTest(unittest.TestCase):
             }
         )
 
-        markdown = format_review_markdown(result, findings=[], inline_findings_count=1)
+        markdown = format_review_markdown(result, findings=[inline_finding], inline_findings_count=1)
 
-        self.assertIn("1개 항목은 diff inline comment", markdown)
-        self.assertNotIn("Empty input raises", markdown)
+        self.assertIn("검증된 리뷰 1건", markdown)
+        self.assertIn("빈 입력에서 예외가 발생", markdown)
+        self.assertIn("1건은 diff의 해당 줄에도 inline comment", markdown)
 
     def test_review_heading_uses_category_without_abstract_severity(self):
         result = _review_result()
@@ -167,6 +185,98 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("**기능 정확성** - `app/service.py`", markdown)
         self.assertIn("**검토 기준:** `behavior-edge-and-failure-path`", markdown)
         self.assertNotIn("high /", markdown)
+
+    def test_evidence_section_lists_applied_skills_policies_and_knowledge_cards(self):
+        card = ReviewKnowledgeCard(
+            card_id="secret-and-sensitive-log-flow",
+            title="Secret 로그 유출",
+            skill_id="security-boundary",
+            check="check",
+            evidence_required="evidence",
+            false_positive_guard="guard",
+            severity_cap="medium",
+            sources=[
+                ReviewSourceReference(
+                    source_id="owasp-logging",
+                    title="Logging Cheat Sheet",
+                    url="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+                    authority="OWASP",
+                )
+            ],
+        )
+        skill = ReviewSkill(
+            skill_id="security-boundary",
+            title="보안 경계",
+            instructions="instructions",
+        )
+        harness = ReviewHarnessContext(version="1.0", skills=[skill], knowledge_cards=[card])
+        policy = PolicyChunk(
+            source_path="policies/security-and-privacy.md",
+            section_title="Secret 마스킹",
+            content="content",
+        )
+        result = _review_result()
+        result = ReviewResult(
+            **{
+                **result.__dict__,
+                "review_harness": harness,
+                "retrieved_policies": [policy],
+            }
+        )
+
+        markdown = format_review_markdown(result)
+
+        self.assertIn("### 리뷰 근거", markdown)
+        self.assertIn("**적용된 검토 절차**: 보안 경계", markdown)
+        self.assertIn("`policies/security-and-privacy.md#Secret 마스킹`", markdown)
+        self.assertIn(
+            "Secret 로그 유출 (출처: [Logging Cheat Sheet]"
+            "(https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html))",
+            markdown,
+        )
+
+    def test_finding_resolves_knowledge_card_title_and_source_link(self):
+        card = ReviewKnowledgeCard(
+            card_id="secret-and-sensitive-log-flow",
+            title="Secret 로그 유출",
+            skill_id="security-boundary",
+            check="check",
+            evidence_required="evidence",
+            false_positive_guard="guard",
+            severity_cap="medium",
+            sources=[
+                ReviewSourceReference(
+                    source_id="owasp-logging",
+                    title="Logging Cheat Sheet",
+                    url="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+                    authority="OWASP",
+                )
+            ],
+        )
+        harness = ReviewHarnessContext(version="1.0", knowledge_cards=[card])
+        finding = ReviewFinding(
+            severity="high",
+            category="security",
+            file_path="app/service.py",
+            line_start=None,
+            line_end=None,
+            message="토큰이 그대로 로그에 남습니다.",
+            suggestion="로그 남기기 전에 토큰을 마스킹합니다.",
+            knowledge_card_id="secret-and-sensitive-log-flow",
+        )
+        result = _review_result()
+        result = ReviewResult(
+            **{**result.__dict__, "review_harness": harness, "findings": [finding]}
+        )
+
+        markdown = format_review_markdown(result, findings=[finding])
+
+        self.assertIn(
+            "**검토 기준:** Secret 로그 유출 (출처: [Logging Cheat Sheet]"
+            "(https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)) "
+            "(`secret-and-sensitive-log-flow`)",
+            markdown,
+        )
 
     def test_posts_validated_findings_as_pull_request_review_comments(self):
         publisher = GitHubPublisher(token="token")
@@ -202,6 +312,98 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(payload["comments"][0]["path"], "app/service.py")
         self.assertEqual(payload["comments"][0]["line"], 10)
         self.assertEqual(payload["comments"][0]["side"], "RIGHT")
+
+    def test_updates_existing_summary_comment_for_same_review_scope(self):
+        app_client = FakeGitHubAppClient()
+        marker = "<!-- ai-code-review-agent:summary:automatic -->"
+        app_client.comments = [
+            {
+                "id": 88,
+                "body": f"old review\n{marker}",
+                "performed_via_github_app": {"id": 4252630},
+            }
+        ]
+        publisher = GitHubPublisher(app_client=app_client)
+        request = ReviewRequest(
+            repository=RepositoryPayload(provider="github", owner="team", name="repo"),
+            pull_request=PullRequestPayload(
+                number=7,
+                title="Test",
+                author="dev",
+                base_sha="base",
+                head_sha="head",
+                base_branch="main",
+                head_branch="feature",
+            ),
+        )
+
+        response = publisher._upsert_issue_comment(
+            request,
+            "token",
+            f"new review\n{marker}",
+            marker,
+        )
+
+        self.assertEqual(response["id"], 88)
+        self.assertIn(
+            (
+                "PATCH",
+                "/repos/team/repo/issues/comments/88",
+                "token",
+                {"body": f"new review\n{marker}"},
+            ),
+            app_client.requests,
+        )
+
+    def test_removes_previous_inline_comments_for_same_review_scope(self):
+        app_client = FakeGitHubAppClient()
+        marker = "<!-- ai-code-review-agent:inline:automatic -->"
+        app_client.comments = [
+            {
+                "id": 99,
+                "body": f"old finding\n{marker}",
+                "performed_via_github_app": {"id": 4252630},
+            },
+            {
+                "id": 100,
+                "body": "another app finding",
+                "performed_via_github_app": {"id": 999},
+            },
+        ]
+        publisher = GitHubPublisher(app_client=app_client)
+        request = ReviewRequest(
+            repository=RepositoryPayload(provider="github", owner="team", name="repo"),
+            pull_request=PullRequestPayload(
+                number=7,
+                title="Test",
+                author="dev",
+                base_sha="base",
+                head_sha="head",
+                base_branch="main",
+                head_branch="feature",
+            ),
+        )
+
+        publisher._delete_previous_inline_comments(request, "token", marker)
+
+        self.assertIn(
+            (
+                "DELETE",
+                "/repos/team/repo/pulls/comments/99",
+                "token",
+                None,
+            ),
+            app_client.requests,
+        )
+        self.assertNotIn(
+            (
+                "DELETE",
+                "/repos/team/repo/pulls/comments/100",
+                "token",
+                None,
+            ),
+            app_client.requests,
+        )
 
 
 if __name__ == "__main__":

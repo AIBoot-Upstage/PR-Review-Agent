@@ -7,8 +7,10 @@ from backend.app.services.github_app import (
     DEEP_REVIEW_ACTION_IDENTIFIER,
     GitHubWebhookError,
     GitHubWebhookProcessor,
+    _complexity_source_priority,
     verify_github_signature,
 )
+from backend.app.services.rag import REPOSITORY_POLICY_PATH
 
 
 class FakeGitHubClient:
@@ -41,6 +43,15 @@ class FakeGitHubClient:
             }
         ]
 
+    def get_file_content(self, owner, repo, path, ref, token):
+        if path == REPOSITORY_POLICY_PATH:
+            return "# Repository Policy\n\n## API Contract\n\nAPI 응답 계약을 유지한다.\n"
+        if path == "app/api/items.py" and ref == "base-sha":
+            return "def list_items():\n    return []\n"
+        if path == "app/api/items.py" and ref == "head-sha":
+            return "def list_items():\n    return [1]\n"
+        return None
+
 
 def _signature(payload_body: bytes, secret: str) -> str:
     digest = hmac.new(secret.encode("utf-8"), payload_body, hashlib.sha256).hexdigest()
@@ -68,6 +79,23 @@ def _pull_request_payload(number=7):
 
 
 class GitHubWebhookTest(unittest.TestCase):
+    def test_complexity_source_priority_prefers_branch_heavy_patch(self):
+        large_linear_change = {
+            "additions": 200,
+            "deletions": 0,
+            "patch": "+value = normalize(value)\n" * 20,
+        }
+        smaller_branch_change = {
+            "additions": 20,
+            "deletions": 0,
+            "patch": "+if value:\n+    return value\n" * 4,
+        }
+
+        self.assertGreater(
+            _complexity_source_priority(smaller_branch_change),
+            _complexity_source_priority(large_linear_change),
+        )
+
     def test_verify_github_signature_accepts_valid_hmac(self):
         body = b'{"zen":"Keep it logically awesome."}'
         verify_github_signature(body, "secret", _signature(body, "secret"))
@@ -118,6 +146,8 @@ class GitHubWebhookTest(unittest.TestCase):
         self.assertEqual(request.github.installation_id, "123")
         self.assertEqual(request.checks[0].kind, "test")
         self.assertEqual(request.changed_files[0].path, "app/api/items.py")
+        self.assertEqual(request.repository_policies[0].source_path, REPOSITORY_POLICY_PATH)
+        self.assertEqual(request.repository_policies[0].section_title, "API Contract")
 
     def test_check_run_waits_for_check_suite_in_after_checks_mode(self):
         settings = Settings(github_webhook_review_mode="after_checks")
@@ -173,6 +203,8 @@ class GitHubWebhookTest(unittest.TestCase):
         self.assertEqual(request.github.event_name, "check_run.requested_action")
         self.assertEqual(request.github.check_run_id, "456")
         self.assertTrue(request.idempotency_key().endswith(":deep_quality_review"))
+        self.assertIn("return []", request.changed_files[0].base_content)
+        self.assertIn("return [1]", request.changed_files[0].head_content)
 
 
 if __name__ == "__main__":

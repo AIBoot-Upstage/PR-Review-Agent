@@ -21,7 +21,9 @@ AI_REVIEWER_TOKEN=local-reviewer-token
 GITHUB_WEBHOOK_SECRET=local-webhook-secret
 ```
 
-스크립트는 image를 빌드하고, `api + postgres(pgvector)` stack을 실행한 뒤 health, policy sync, review smoke, webhook signature smoke를 확인한다.
+스크립트는 image를 빌드하고, `api + postgres(pgvector)` stack을 실행한 뒤 health, policy sync,
+review smoke, webhook signature smoke를 확인한다. `PUBLISH_MODE=github_app`에서는 App ID와 private
+key로 GitHub JWT 인증까지 수행하므로 값이 존재하지만 서로 맞지 않는 설정도 시작 단계에서 실패한다.
 
 ## 확인
 
