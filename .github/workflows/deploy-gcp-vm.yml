@@ -177,6 +177,12 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
         if: ${{ steps.target.outputs.deploy_target == 'gcp-vm' }}
 
+      - name: Speed up IAP tunnel transfers with NumPy
+        if: ${{ steps.target.outputs.deploy_target == 'gcp-vm' }}
+        run: |
+          python3 -m pip install --user numpy
+          echo "CLOUDSDK_PYTHON=$(command -v python3)" >> "${GITHUB_ENV}"
+
       - name: Configure fixed SSH deploy key
         if: ${{ steps.target.outputs.deploy_target == 'gcp-vm' }}
         env:
