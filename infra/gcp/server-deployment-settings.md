@@ -253,30 +253,40 @@ gcloud iam service-accounts add-iam-policy-binding "${VM_ATTACHED_SA}" \
 VM에 기본 Compute Engine service account가 아닌 별도 service account를 붙였다면
 `VM_ATTACHED_SA`를 해당 email로 바꾼다.
 
-VM 접속 계정은 Docker를 실행할 수 있어야 한다. OS Login을 사용하는 경우 GitHub Actions가
-impersonate하는 service account 기반 Linux 사용자가 `docker compose`를 실행할 수 있는지
-반드시 확인한다.
+OS Login을 쓰면 GitHub Actions가 impersonate하는 service account의 SSH 로그인 계정은
+`sa_<unique-id>` 형태로 세션마다 임시 생성되고 `$HOME`도 매번 그 계정 기준으로 바뀐다.
+그래서 배포 디렉터리를 `$HOME` 상대 경로로 두면 계정이 바뀔 때마다 기존 배포 상태(`.env`
+등)를 못 찾는 문제가 생긴다. 이 때문에 배포 디렉터리는 로그인 계정과 무관한 고정 경로
+`/opt/ai-code-review-agent-deploy`를 쓰고, 배포 스크립트는 이 디렉터리/`docker` 명령을
+전부 `sudo`로 실행한다 — 이 service account 계정은 세션 간에 `docker` 그룹 멤버십을
+유지할 수 없지만(계정 자체가 매번 새로 생기므로), `roles/compute.osAdminLogin`으로
+비밀번호 없는 sudo는 항상 가능하기 때문이다.
 
 ## VM .env 위치
 
 VM에 다음 파일을 미리 생성한다.
 
 ```text
-~/ai-code-review-agent-deploy/.env
+/opt/ai-code-review-agent-deploy/.env
 ```
 
 생성 예시:
 
 ```bash
-mkdir -p ~/ai-code-review-agent-deploy
-nano ~/ai-code-review-agent-deploy/.env
+sudo mkdir -p /opt/ai-code-review-agent-deploy
+sudo nano /opt/ai-code-review-agent-deploy/.env
 ```
+
+사람이 직접 sudo 없이 다루려면 `docker` group에 자신의 OS Login 계정을 추가하고
+디렉터리를 그 group에 맞춰두면 된다 (`sudo chgrp -R docker /opt/ai-code-review-agent-deploy`,
+`sudo chmod -R 2775 /opt/ai-code-review-agent-deploy`). service account는 이 방법이
+안 통하므로(계정이 세션마다 새로 생성됨) 배포 스크립트는 항상 sudo를 쓴다.
 
 `.env`를 수정한 뒤 이미 실행 중인 컨테이너에 반영하려면 컨테이너 재생성이 필요하다.
 
 ```bash
-cd ~/ai-code-review-agent-deploy
-COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent up -d --no-build --force-recreate
+cd /opt/ai-code-review-agent-deploy
+sudo env COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent up -d --no-build --force-recreate
 ```
 
 ## VM .env Template
@@ -506,7 +516,7 @@ VM `.env`에서 `COMPOSE_PROFILES=edge`를 설정하지 않으면 `caddy` profil
 ## GCP Secret Manager
 
 현재 구현에서는 Secret Manager가 필수는 아니다. 앱 런타임 비밀값은 VM의
-`~/ai-code-review-agent-deploy/.env`에서 읽는다.
+`/opt/ai-code-review-agent-deploy/.env`에서 읽는다.
 
 Secret Manager로 옮길 수 있는 후보:
 
@@ -559,7 +569,7 @@ docker compose up --build
 2. IAP SSH 접속 가능 여부 확인
 3. Workload Identity Pool, Provider, Service Account 생성
 4. GitHub Variables/Secrets 등록
-5. VM에 `~/ai-code-review-agent-deploy/.env` 생성
+5. VM에 `/opt/ai-code-review-agent-deploy/.env` 생성
 6. 도메인 또는 정적 IP 연결
 7. `COMPOSE_PROFILES=edge`, `DOMAIN` 설정 후 Caddy/TLS 실행
 8. GitHub App webhook URL 변경
@@ -573,9 +583,9 @@ docker compose up --build
 VM에서:
 
 ```bash
-cd ~/ai-code-review-agent-deploy
-COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent ps
-COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent logs -f api caddy
+cd /opt/ai-code-review-agent-deploy
+sudo env COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent ps
+sudo env COMPOSE_FILE=docker-compose.yml docker compose -p ai-code-review-agent logs -f api caddy
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
