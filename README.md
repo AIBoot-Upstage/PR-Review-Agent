@@ -378,3 +378,5 @@ infra/gcp               GCP deployment notes and sample env
 infra/local-deploy      Local image-based deployment test compose
 scripts                 Local deployment and smoke test helpers
 ```
+
+<!-- webhook secret 재발급 확인용 테스트 커밋 -->
